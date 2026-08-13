@@ -53,6 +53,24 @@ type SinkState struct {
 	// no sync has yet triggered a sinkpush run. `agentcookie status`
 	// surfaces this; `agentcookie wizard verify-adapters` reads it.
 	LastAdapterResults []AdapterResult `json:"last_adapter_results,omitempty"`
+
+	// LiveCDP tracks the Linux sink's live CDP injection path (attach to
+	// an already-running Chrome via --remote-debugging-port). Populated
+	// when live_cdp.enabled is true in sink.yaml.
+	LiveCDP *LiveCDPState `json:"live_cdp,omitempty"`
+}
+
+// LiveCDPState records the outcome of live CDP injection into an
+// already-running Chrome. This is the Linux sink's primary injection path.
+type LiveCDPState struct {
+	Enabled       bool      `json:"enabled"`
+	Endpoint      string    `json:"endpoint"`
+	LastInjectAt  time.Time `json:"last_inject_at,omitempty"`
+	LastContexts  int       `json:"last_contexts,omitempty"`
+	LastCookies   int       `json:"last_cookies,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	TotalInjects  int       `json:"total_injects"`
+	TotalFailures int       `json:"total_failures"`
 }
 
 // AdapterResult is the per-adapter outcome of the most recent sinkpush

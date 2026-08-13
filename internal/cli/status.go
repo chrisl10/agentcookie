@@ -119,6 +119,20 @@ var statusCmd = &cobra.Command{
 				}
 				fmt.Printf("    adapters (last run): %d ok, %d skipped, %d failed (of %d)\n", ok, skipped, failed, n)
 			}
+			if cdp := st.SinkState.LiveCDP; cdp != nil && cdp.Enabled {
+				cdpAgo := "never"
+				if !cdp.LastInjectAt.IsZero() {
+					cdpAgo = time.Since(cdp.LastInjectAt).Round(time.Second).String() + " ago"
+				}
+				fmt.Printf("    live_cdp: endpoint=%s, %d injects, %d failures, last inject %s\n",
+					cdp.Endpoint, cdp.TotalInjects, cdp.TotalFailures, cdpAgo)
+				if cdp.LastCookies > 0 || cdp.LastContexts > 0 {
+					fmt.Printf("      last inject: %d cookies into %d context(s)\n", cdp.LastCookies, cdp.LastContexts)
+				}
+				if cdp.LastError != "" {
+					fmt.Printf("      last error: %s\n", cdp.LastError)
+				}
+			}
 		}
 		for _, e := range st.Errors {
 			fmt.Fprintf(os.Stderr, "  warning: %s\n", e)

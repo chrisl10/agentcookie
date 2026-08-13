@@ -241,6 +241,51 @@ The source is macOS only (it reads Chrome via the macOS Keychain-backed decrypt 
 - **macOS sink**: full two-machine continuous sync via Tailscale `/sync`. Writes Chrome SQLite + plaintext sidecar + per-CLI adapters. LaunchAgent for unattended sync.
 - **Linux sink** (new in v0.14): continuous sync via Tailscale `/sync`, with live CDP injection into a running Chrome. This is the Grok Bot / agent-runtime path: the Linux box wakes up logged into source-allowlisted sites without a second login. No Chrome SQLite rewrite, no Keychain, no libsecret — just live CDP injection into Chrome started with `--remote-debugging-port`. The Linux sink MUST bind a Tailscale 100.x address; it will not start without a tailnet. Security: missing policy defaults to allowlist-empty (ship nothing) on Linux, so the operator must explicitly configure which domains sync.
 
+### Linux sink configuration
+
+The Linux sink injects cookies via CDP into an already-running Chrome. Key configuration points:
+
+1. **live_cdp.endpoint**: Set in `sink.yaml` to the Chrome debug port. Default is `http://127.0.0.1:9223`. If your Chrome runs on a different port (e.g., 9228), configure it:
+
+   ```yaml
+   live_cdp:
+     enabled: true
+     endpoint: http://127.0.0.1:9228
+   ```
+
+2. **Cookie policy**: Linux defaults to allowlist-empty (ship nothing) when no `blocklist.yaml` exists. You MUST explicitly allow domains:
+
+   ```yaml
+   version: 1
+   policy: allowlist
+   domains:
+     - pattern: "github.com"
+     - pattern: "%.github.com"
+     - pattern: "%.amazon.com"
+   ```
+
+3. **Ok-line and status**: The sink reports `wrote 0 cookies` for Chrome SQLite on Linux — this is expected. The real injection happens via live CDP. Look for `live_cdp: injected N cookies into M context(s)` in the response and `agentcookie status` output. `agentcookie doctor` checks the live CDP endpoint and probes common debug ports if the configured one is unreachable.
+
+4. **Daemon setup**: Linux has no LaunchAgents. The wizard prints a systemd user unit you can install:
+
+   ```bash
+   # Copy the unit file to ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   systemctl --user enable --now agentcookie-sink.service
+   ```
+
+   Or run the sink manually / via supervisor:
+
+   ```bash
+   agentcookie sink
+   ```
+
+5. **Chrome launch**: Start Chrome with the debug port before the sink runs:
+
+   ```bash
+   google-chrome --remote-debugging-port=9223
+   ```
+
 Working:
 
 - Continuous laptop to second-Mac sync via fsnotify on Chrome's Cookies file, debounced, cookie-policy filtered, AES-256-GCM over Tailscale.
@@ -254,7 +299,7 @@ Working:
 - Universal cookie delivery: one macOS login-password entry at install (no GUI click) opens the sink's Chrome Safe Storage key to any cookie reader via a partition list (`apple-tool:,apple:,teamid:<your-team>`), so unmodified cookie tools (yt-dlp, gallery-dl, browser-driving agents, the Printing Press CLIs) read the real synced Default Chrome profile. Verified live on macOS 15.x.
 - Apple Developer ID signed binaries; the sink daemon reads Chrome Safe Storage via the `teamid:` partition (no per-binary trust list, no recreate of the key value).
 - Headless second-Mac install over SSH: one login-password entry, no GUI SecurityAgent click. A box with no password available installs in degraded mode (sidecar + adapters still work) and prints the one-line upgrade command.
-- `agentcookie doctor` runs fifteen health categories including cookie delivery (universal vs degraded, with duplicate-keychain-item race detection), binary signature + install, Tailscale, config, keystore, listener bind, sink/source state, sealing posture, adapter coverage, CDP injector health, secrets-bus + secret coverage, and DBSC-suspect cookies.
+- `agentcookie doctor` runs health checks including cookie delivery (universal vs degraded, with duplicate-keychain-item race detection), binary signature + install, daemon binary path match, Tailscale, config, keystore, listener bind, sink/source state, sealing posture, adapter coverage, CDP injector health, live CDP endpoint (Linux), secrets-bus + secret coverage, and DBSC-suspect cookies.
 - 520+ unit tests across 26 packages.
 
 Not yet:

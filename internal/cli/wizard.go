@@ -213,17 +213,23 @@ func wizardInstallSource(ctx context.Context, binPath, logDir string) error {
 		fmt.Fprintf(os.Stderr, "agentcookie wizard: paired with %q (code was %s)\n", wizardPeer, code)
 	}
 
-	// Step 4: install the LaunchAgent unless skipped.
+	// Step 4: install the daemon unless skipped.
 	if !wizardSkipDaemon {
-		if err := installLaunchAgent(launchd.Spec{
-			Role:       launchd.RoleSource,
-			BinaryPath: binPath,
-			LogDir:     logDir,
-			ExtraArgs:  []string{"--watch"},
-		}); err != nil {
-			return fmt.Errorf("install source LaunchAgent: %w", err)
+		if config.IsLinux() {
+			// Linux: no LaunchAgents. Print systemd user unit or supervisor
+			// instructions so the operator can install the daemon themselves.
+			printLinuxDaemonInstructions("source", binPath, logDir, []string{"--watch"})
+		} else {
+			if err := installLaunchAgent(launchd.Spec{
+				Role:       launchd.RoleSource,
+				BinaryPath: binPath,
+				LogDir:     logDir,
+				ExtraArgs:  []string{"--watch"},
+			}); err != nil {
+				return fmt.Errorf("install source LaunchAgent: %w", err)
+			}
+			fmt.Fprintln(os.Stderr, "agentcookie wizard: source LaunchAgent installed and started")
 		}
-		fmt.Fprintln(os.Stderr, "agentcookie wizard: source LaunchAgent installed and started")
 	}
 
 	if !wizardSkipExitNode {
@@ -341,14 +347,20 @@ func wizardInstallSink(ctx context.Context, binPath, logDir string) error {
 	_ = keychainOpened
 
 	if !wizardSkipDaemon {
-		if err := installLaunchAgent(launchd.Spec{
-			Role:       launchd.RoleSink,
-			BinaryPath: binPath,
-			LogDir:     logDir,
-		}); err != nil {
-			return fmt.Errorf("install sink LaunchAgent: %w", err)
+		if config.IsLinux() {
+			// Linux: no LaunchAgents. Print systemd user unit or supervisor
+			// instructions so the operator can install the daemon themselves.
+			printLinuxDaemonInstructions("sink", binPath, logDir, nil)
+		} else {
+			if err := installLaunchAgent(launchd.Spec{
+				Role:       launchd.RoleSink,
+				BinaryPath: binPath,
+				LogDir:     logDir,
+			}); err != nil {
+				return fmt.Errorf("install sink LaunchAgent: %w", err)
+			}
+			fmt.Fprintln(os.Stderr, "agentcookie wizard: sink LaunchAgent installed and started")
 		}
-		fmt.Fprintln(os.Stderr, "agentcookie wizard: sink LaunchAgent installed and started")
 	}
 
 	if !wizardSkipExitNode {
@@ -980,4 +992,133 @@ func errIsAlreadyLoaded(err error) bool {
 	// We do not enumerate them here; the kickstart attempt is safe regardless.
 	_ = time.Second // placeholder reference to avoid import-cleanup issues
 	return false
+}
+
+// systemdQuote returns an argument quoted for use in systemd ExecStart and
+// similar command-line directives. Systemd uses C-style escaping and wraps
+// in double quotes if the argument contains whitespace or systemd specifiers.
+func systemdQuote(path string) string {
+	needsQuotes := false
+	for _, c := range path {
+		if c == ' ' || c == '\t' || c == '%' || c == '"' || c == '\\' {
+			needsQuotes = true
+			break
+		}
+	}
+	if !needsQuotes {
+		return path
+	}
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, c := range path {
+		switch c {
+		case '\\', '"':
+			b.WriteByte('\\')
+			b.WriteRune(c)
+		case '%':
+			b.WriteString("%%")
+		default:
+			b.WriteRune(c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// systemdEscapePath returns a path escaped for use in systemd file-path
+// directives like StandardOutput=append: and StandardError=append:.
+// These directives do NOT support quote-wrapped paths after the prefix;
+// instead, special characters must be C-style escaped directly.
+// See systemd.exec(5) for details.
+func systemdEscapePath(path string) string {
+	var b strings.Builder
+	for _, c := range path {
+		switch c {
+		case ' ':
+			b.WriteString("\\x20")
+		case '\t':
+			b.WriteString("\\x09")
+		case '\n':
+			b.WriteString("\\x0a")
+		case '\\':
+			b.WriteString("\\\\")
+		case '%':
+			b.WriteString("%%")
+		default:
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
+
+// shellQuote returns a path quoted for use in shell commands.
+// Uses single quotes which prevent all expansion except for embedded single quotes.
+func shellQuote(path string) string {
+	if !strings.ContainsAny(path, " \t'\"\\$`!") {
+		return path
+	}
+	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+}
+
+// printLinuxDaemonInstructions prints systemd user unit instructions for Linux.
+// LaunchAgents are macOS-only; on Linux the operator must install the daemon
+// themselves. This function prints exact instructions including a systemd user
+// unit file the operator can copy, or supervisor/manual run commands.
+func printLinuxDaemonInstructions(role, binPath, logDir string, extraArgs []string) {
+	home, _ := os.UserHomeDir()
+	unitName := "agentcookie-" + role + ".service"
+	unitPath := filepath.Join(home, ".config", "systemd", "user", unitName)
+
+	// Build the command line from the actual binary path (os.Executable()).
+	// Quote each argument for systemd's ExecStart parsing.
+	quotedArgs := make([]string, 0, len(extraArgs)+2)
+	quotedArgs = append(quotedArgs, systemdQuote(binPath), role)
+	for _, arg := range extraArgs {
+		quotedArgs = append(quotedArgs, systemdQuote(arg))
+	}
+	execStart := strings.Join(quotedArgs, " ")
+
+	// Build shell-quoted manual run command.
+	shellArgs := make([]string, 0, len(extraArgs)+2)
+	shellArgs = append(shellArgs, shellQuote(binPath), role)
+	for _, arg := range extraArgs {
+		shellArgs = append(shellArgs, shellQuote(arg))
+	}
+	manualRun := strings.Join(shellArgs, " ")
+
+	outLog := filepath.Join(logDir, role+".out.log")
+	errLog := filepath.Join(logDir, role+".err.log")
+
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "agentcookie wizard: Linux detected; LaunchAgents are macOS-only.")
+	fmt.Fprintln(os.Stderr, "agentcookie wizard: To run the daemon, use one of these methods:")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  1. SYSTEMD USER UNIT (recommended for persistent operation):")
+	fmt.Fprintf(os.Stderr, "     mkdir -p %s\n", shellQuote(filepath.Dir(unitPath)))
+	fmt.Fprintf(os.Stderr, "     cat > %s << 'EOF'\n", shellQuote(unitPath))
+	fmt.Fprintln(os.Stderr, "[Unit]")
+	fmt.Fprintf(os.Stderr, "Description=agentcookie %s daemon\n", role)
+	fmt.Fprintln(os.Stderr, "After=network.target")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "[Service]")
+	fmt.Fprintf(os.Stderr, "ExecStart=%s\n", execStart)
+	fmt.Fprintln(os.Stderr, "Restart=on-failure")
+	fmt.Fprintln(os.Stderr, "RestartSec=10")
+	fmt.Fprintf(os.Stderr, "StandardOutput=append:%s\n", systemdEscapePath(outLog))
+	fmt.Fprintf(os.Stderr, "StandardError=append:%s\n", systemdEscapePath(errLog))
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "[Install]")
+	fmt.Fprintln(os.Stderr, "WantedBy=default.target")
+	fmt.Fprintln(os.Stderr, "EOF")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "     Then run:")
+	fmt.Fprintf(os.Stderr, "     mkdir -p %s\n", shellQuote(logDir))
+	fmt.Fprintln(os.Stderr, "     systemctl --user daemon-reload")
+	fmt.Fprintf(os.Stderr, "     systemctl --user enable --now %s\n", unitName)
+	fmt.Fprintf(os.Stderr, "     systemctl --user status %s\n", unitName)
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "  2. SUPERVISOR / MANUAL RUN:")
+	fmt.Fprintf(os.Stderr, "     %s\n", manualRun)
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintf(os.Stderr, "agentcookie wizard: %s config written; daemon must be started manually on Linux\n", role)
 }

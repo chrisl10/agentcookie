@@ -8,19 +8,20 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mvanhorn/agentcookie/internal/cdp"
 	"github.com/mvanhorn/agentcookie/internal/chrome"
-	"github.com/mvanhorn/agentcookie/internal/livecdp"
 	"github.com/mvanhorn/agentcookie/internal/chromectl"
 	"github.com/mvanhorn/agentcookie/internal/chromedirsync"
 	"github.com/mvanhorn/agentcookie/internal/chromepaths"
 	"github.com/mvanhorn/agentcookie/internal/cli/httpserver"
 	"github.com/mvanhorn/agentcookie/internal/config"
 	"github.com/mvanhorn/agentcookie/internal/keystore"
+	"github.com/mvanhorn/agentcookie/internal/livecdp"
 	"github.com/mvanhorn/agentcookie/internal/protocol"
 	"github.com/mvanhorn/agentcookie/internal/secretsbus"
 	"github.com/mvanhorn/agentcookie/internal/sinkpush"
@@ -146,7 +147,8 @@ func runSink(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr, "agentcookie sink: cmux delivery surface enabled")
 	}
 
-	mux := newSinkMux(cfg, transportSecret, key, seqTracker, stateWriter, sinkState)
+	var stateMu sync.Mutex
+	mux := newSinkMux(cfg, transportSecret, key, seqTracker, stateWriter, sinkState, &stateMu)
 
 	srv := httpserver.Configure(&http.Server{Addr: cfg.Listen.Addr, Handler: mux}, httpserver.SinkSync)
 	if sinkDryRun {
@@ -181,6 +183,7 @@ func newSinkMux(
 	seqTracker *protocol.SequenceTracker,
 	stateWriter *state.Writer,
 	sinkState *state.SinkState,
+	stateMu *sync.Mutex,
 ) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +218,7 @@ func newSinkMux(
 		bl, err := loadFreshBlocklist()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "agentcookie sink: cookie policy load failed: %v\n", err)
-			recordSinkReject(sinkState, stateWriter, err)
+			recordSinkReject(sinkState, stateWriter, stateMu, err)
 			http.Error(w, "load blocklist: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -247,12 +250,14 @@ func newSinkMux(
 				"cookies":         cookies,
 			}, "", "  ")
 			fmt.Fprintf(os.Stderr, "agentcookie sink (dry-run): accepted batch:\n%s\n", string(dump))
+			stateMu.Lock()
 			sinkState.LastWrite = time.Now().UTC()
 			sinkState.LastWriteCount = len(cookies)
 			sinkState.LastWriteMode = "dry-run"
 			sinkState.TotalWrites++
 			sinkState.TotalDropped += dropped
 			_ = stateWriter.Save(sinkState)
+			stateMu.Unlock()
 			_, _ = fmt.Fprintf(w, "dry-run ok: accepted %d cookies; dropped %d %s cookies\n", len(cookies), dropped, blockMatcher.DropLabel())
 			return
 		}
@@ -275,23 +280,11 @@ func newSinkMux(
 		}
 		if writeErr != nil {
 			fmt.Fprintf(os.Stderr, "agentcookie sink: write failed (cookies=%d ls=%d idb=%d mode=%s): %v\n", result.Cookies, result.LocalStorage, result.IndexedDB, writeMode, writeErr)
-			recordSinkReject(sinkState, stateWriter, writeErr)
+			recordSinkReject(sinkState, stateWriter, stateMu, writeErr)
 			http.Error(w, fmt.Sprintf("apply envelope: %v", writeErr), http.StatusInternalServerError)
 			return
 		}
 		fmt.Fprintf(os.Stderr, "agentcookie sink: wrote %d cookies (+ %d sidecar) + %d localStorage origins + %d indexedDB origins (mode=%s, dropped %d %s cookies)\n", result.Cookies, result.SidecarCookies, result.LocalStorage, result.IndexedDB, writeMode, dropped, blockMatcher.DropLabel())
-		sinkState.LastWrite = time.Now().UTC()
-		// In skip_chrome_sqlite mode, result.Cookies is zero (we did not
-		// write Chrome SQLite); report the sidecar count so sink-state
-		// reflects what actually shipped to PP CLI consumers.
-		if cfg.SkipChromeSQLite {
-			sinkState.LastWriteCount = result.SidecarCookies
-		} else {
-			sinkState.LastWriteCount = result.Cookies
-		}
-		sinkState.LastWriteMode = writeMode
-		sinkState.TotalWrites++
-		sinkState.TotalDropped += dropped
 
 		// v0.12.0-beta.3: when CDP injection is enabled, spawn a
 		// one-shot headless Chrome and push the cookies via
@@ -300,6 +293,7 @@ func newSinkMux(
 		// Keychain item on this path. Failures are logged but do not
 		// fail the /sync response -- the sidecar write already
 		// succeeded above, so PP CLIs are still served.
+		var cdpWriteMode string
 		if cfg.CDP.Enabled && len(cookies) > 0 {
 			profileDir := cfg.CDP.ProfileDir
 			if profileDir == "" {
@@ -309,7 +303,7 @@ func newSinkMux(
 				fmt.Fprintf(os.Stderr, "agentcookie sink: CDP injection failed (sidecar write succeeded, PP CLIs unaffected): %v\n", cdpErr)
 			} else {
 				fmt.Fprintf(os.Stderr, "agentcookie sink: CDP injection pushed %d cookies into %s\n", len(cookies), profileDir)
-				sinkState.LastWriteMode = writeMode + "+cdp"
+				cdpWriteMode = "+cdp"
 			}
 		}
 
@@ -319,16 +313,19 @@ func newSinkMux(
 		// no Keychain, no Chrome SQLite rewrite, just live CDP injection
 		// into a Chrome that the agent runtime (e.g., Grok Bot) already
 		// started with --remote-debugging-port.
+		var liveCDPContexts int
+		var liveCDPErr error
+		var liveCDPEndpoint string
 		if cfg.LiveCDP.Enabled && len(cookies) > 0 {
-			endpoint := cfg.LiveCDP.Endpoint
-			if endpoint == "" {
-				endpoint = livecdp.DefaultCDPEndpoint
+			liveCDPEndpoint = cfg.LiveCDP.Endpoint
+			if liveCDPEndpoint == "" {
+				liveCDPEndpoint = livecdp.DefaultCDPEndpoint
 			}
-			if n, lcdpErr := livecdp.AttachAndInject(r.Context(), endpoint, cookies); lcdpErr != nil {
-				fmt.Fprintf(os.Stderr, "agentcookie sink: live CDP injection failed (sidecar write succeeded): %v\n", lcdpErr)
+			liveCDPContexts, liveCDPErr = livecdp.AttachAndInject(r.Context(), liveCDPEndpoint, cookies)
+			if liveCDPErr != nil {
+				fmt.Fprintf(os.Stderr, "agentcookie sink: live CDP injection failed (sidecar write succeeded): %v\n", liveCDPErr)
 			} else {
-				fmt.Fprintf(os.Stderr, "agentcookie sink: live CDP injection pushed %d cookies into %d context(s) at %s\n", len(cookies), n, endpoint)
-				sinkState.LastWriteMode = writeMode + "+livecdp"
+				fmt.Fprintf(os.Stderr, "agentcookie sink: live CDP injection pushed %d cookies into %d context(s) at %s\n", len(cookies), liveCDPContexts, liveCDPEndpoint)
 			}
 		}
 
@@ -338,9 +335,9 @@ func newSinkMux(
 		// headlessly on this sink with zero per-binary Keychain prompts.
 		// Adapter failures are reported but do not block the sync. See
 		// plan 2026-05-17-007.
+		var adapterResults []sinkpush.Result
 		if len(cookies) > 0 {
-			adapterResults := sinkpush.RunAll(cookies)
-			sinkState.LastAdapterResults = toStateAdapterResults(adapterResults)
+			adapterResults = sinkpush.RunAll(cookies)
 			logAdapterResults(adapterResults)
 		}
 
@@ -361,22 +358,81 @@ func newSinkMux(
 				secResult.CLIsWritten, secResult.KeysWritten, secResult.SealedWritten, secResult.FilesMaterialized)
 		}
 
+		// Update sink state under mutex to avoid races from concurrent /sync handlers.
+		stateMu.Lock()
+		sinkState.LastWrite = time.Now().UTC()
+		if cfg.SkipChromeSQLite {
+			sinkState.LastWriteCount = result.SidecarCookies
+		} else {
+			sinkState.LastWriteCount = result.Cookies
+		}
+		sinkState.LastWriteMode = writeMode + cdpWriteMode
+		sinkState.TotalWrites++
+		sinkState.TotalDropped += dropped
+		if cfg.LiveCDP.Enabled && len(cookies) > 0 {
+			sinkState.LastWriteMode = writeMode + "+livecdp"
+			if sinkState.LiveCDP == nil {
+				sinkState.LiveCDP = &state.LiveCDPState{
+					Enabled:  true,
+					Endpoint: liveCDPEndpoint,
+				}
+			}
+			sinkState.LiveCDP.LastInjectAt = time.Now().UTC()
+			sinkState.LiveCDP.LastCookies = len(cookies)
+			sinkState.LiveCDP.LastContexts = liveCDPContexts
+			if liveCDPErr != nil {
+				sinkState.LiveCDP.LastError = liveCDPErr.Error()
+				sinkState.LiveCDP.TotalFailures++
+			} else {
+				sinkState.LiveCDP.LastError = ""
+				sinkState.LiveCDP.TotalInjects++
+			}
+		}
+		if len(adapterResults) > 0 {
+			sinkState.LastAdapterResults = toStateAdapterResults(adapterResults)
+		}
 		_ = stateWriter.Save(sinkState)
-		_, _ = fmt.Fprintf(w, "ok: wrote %d cookies (%d sidecar), %d localStorage origins, %d indexedDB origins; dropped %d %s cookies\n", result.Cookies, result.SidecarCookies, result.LocalStorage, result.IndexedDB, dropped, blockMatcher.DropLabel())
+		stateMu.Unlock()
+
+		// Build the ok-line. When live CDP ran, include inject result so
+		// operators don't mistake "wrote 0 cookies" for a failure (Linux
+		// skips SQLite and injects via live CDP; the sidecar+livecdp path
+		// is the real delivery).
+		okLine := fmt.Sprintf("ok: wrote %d cookies (%d sidecar), %d localStorage origins, %d indexedDB origins; dropped %d %s cookies",
+			result.Cookies, result.SidecarCookies, result.LocalStorage, result.IndexedDB, dropped, blockMatcher.DropLabel())
+		if cfg.LiveCDP.Enabled {
+			endpoint := liveCDPEndpoint
+			if endpoint == "" {
+				endpoint = cfg.LiveCDP.Endpoint
+				if endpoint == "" {
+					endpoint = livecdp.DefaultCDPEndpoint
+				}
+			}
+			if liveCDPErr != nil {
+				okLine += fmt.Sprintf("; live_cdp: FAILED at %s: %v", endpoint, liveCDPErr)
+			} else if liveCDPContexts > 0 {
+				okLine += fmt.Sprintf("; live_cdp: injected %d cookies into %d context(s) at %s", len(cookies), liveCDPContexts, endpoint)
+			} else if len(cookies) == 0 {
+				okLine += fmt.Sprintf("; live_cdp: no cookies to inject (endpoint=%s)", endpoint)
+			}
+		}
+		_, _ = fmt.Fprintln(w, okLine)
 	})
 	return mux
 }
 
-func recordSinkReject(sinkState *state.SinkState, stateWriter *state.Writer, err error) {
+func recordSinkReject(sinkState *state.SinkState, stateWriter *state.Writer, stateMu *sync.Mutex, err error) {
 	if sinkState == nil {
 		return
 	}
+	stateMu.Lock()
 	sinkState.LastError = err.Error()
 	sinkState.LastErrorAt = time.Now().UTC()
 	sinkState.TotalRejects++
 	if stateWriter != nil {
 		_ = stateWriter.Save(sinkState)
 	}
+	stateMu.Unlock()
 }
 
 // toStateAdapterResults converts sinkpush.Result slices to the state

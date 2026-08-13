@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/mvanhorn/agentcookie/internal/chrome"
@@ -495,7 +496,8 @@ func newSinkHandlerFixture(t *testing.T, dryRun bool) *sinkHandlerFixture {
 	seqTracker := protocol.NewSequenceTracker()
 	sinkState := &state.SinkState{Role: "sink", ListenAddr: cfg.Listen.Addr}
 	stateWriter := state.NewWriter(filepath.Join(t.TempDir(), "sink-state.json"))
-	mux := newSinkMux(cfg, secret, []byte("0123456789abcdef"), seqTracker, stateWriter, sinkState)
+	var stateMu sync.Mutex
+	mux := newSinkMux(cfg, secret, []byte("0123456789abcdef"), seqTracker, stateWriter, sinkState, &stateMu)
 
 	return &sinkHandlerFixture{
 		configDir:  configDir,
