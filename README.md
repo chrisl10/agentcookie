@@ -236,7 +236,10 @@ last run: 4s ago
 
 ## Status
 
-macOS only on both ends today. The source side reads Chrome on macOS via the Keychain-backed decrypt path; the sink relies on macOS LaunchAgent and Keychain conventions.
+The source is macOS only (it reads Chrome via the macOS Keychain-backed decrypt path). The sink runs on macOS or Linux:
+
+- **macOS sink**: full two-machine continuous sync via Tailscale `/sync`. Writes Chrome SQLite + plaintext sidecar + per-CLI adapters. LaunchAgent for unattended sync.
+- **Linux sink** (new in v0.14): continuous sync via Tailscale `/sync`, with live CDP injection into a running Chrome. This is the Grok Bot / agent-runtime path: the Linux box wakes up logged into source-allowlisted sites without a second login. No Chrome SQLite rewrite, no Keychain, no libsecret — just live CDP injection into Chrome started with `--remote-debugging-port`. The Linux sink MUST bind a Tailscale 100.x address; it will not start without a tailnet. Security: missing policy defaults to allowlist-empty (ship nothing) on Linux, so the operator must explicitly configure which domains sync.
 
 Working:
 

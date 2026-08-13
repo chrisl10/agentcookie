@@ -235,8 +235,11 @@ unexpected: true
 
 func TestSinkSyncWellFormedBlocklistFiltersBeforeWrite(t *testing.T) {
 	fx := newSinkHandlerFixture(t, false)
+	// Explicit policy: blocklist ensures the same behavior on Darwin and Linux.
+	// Without it, Linux defaults to allowlist-empty (missing policy = ship nothing).
 	writeCLIFile(t, filepath.Join(fx.configDir, "blocklist.yaml"), `
 version: 1
+policy: blocklist
 domains:
   - pattern: "%.blocked.com"
 `)
@@ -283,6 +286,13 @@ domains:
 }
 
 func TestSinkSyncMissingBlocklistSyncsAll(t *testing.T) {
+	// On Linux, missing blocklist defaults to allowlist-empty (sync nothing).
+	// This test exercises the Darwin default (blocklist = sync-all).
+	// Skip on Linux; the Linux-specific behavior is tested separately.
+	if config.IsLinux() {
+		t.Skip("skipping: Linux defaults to allowlist-empty; see TestSinkSyncMissingBlocklistLinuxAllowlistEmpty")
+	}
+
 	fx := newSinkHandlerFixture(t, false)
 
 	rec := fx.postSync(1, []chrome.Cookie{
@@ -298,6 +308,34 @@ func TestSinkSyncMissingBlocklistSyncsAll(t *testing.T) {
 	}
 }
 
+// TestSinkSyncMissingBlocklistLinuxAllowlistEmpty verifies the Linux-specific
+// default: when no blocklist.yaml exists, the sink treats this as an empty
+// allowlist (ship nothing). This is security-by-default for untrusted sinks.
+func TestSinkSyncMissingBlocklistLinuxAllowlistEmpty(t *testing.T) {
+	if !config.IsLinux() {
+		t.Skip("skipping: this test exercises Linux-specific allowlist-empty default")
+	}
+
+	fx := newSinkHandlerFixture(t, false)
+
+	rec := fx.postSync(1, []chrome.Cookie{
+		{HostKey: ".one.com", Name: "one", Value: "1", Path: "/"},
+		{HostKey: ".two.com", Name: "two", Value: "2", Path: "/"},
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	// Linux allowlist-empty: no cookies synced, response reports dropped count.
+	if !strings.Contains(rec.Body.String(), "dropped 2 non-allowlisted cookies") {
+		t.Errorf("response should report all cookies dropped as non-allowlisted, got %q", rec.Body.String())
+	}
+	// No cookies written, so sidecar may not exist or be empty.
+	if got := fx.sidecarHostsOrEmpty(); len(got) != 0 {
+		t.Fatalf("sidecar hosts = %v, want empty (allowlist-empty default)", got)
+	}
+}
+
 func TestSinkSyncReloadsBlocklistBetweenRequests(t *testing.T) {
 	fx := newSinkHandlerFixture(t, false)
 	cookies := []chrome.Cookie{
@@ -305,6 +343,13 @@ func TestSinkSyncReloadsBlocklistBetweenRequests(t *testing.T) {
 		{HostKey: ".allowed.com", Name: "allowed", Value: "a", Path: "/"},
 	}
 
+	// First request: explicit blocklist with no domains (sync-all).
+	// This ensures consistent behavior on both Darwin and Linux.
+	writeCLIFile(t, filepath.Join(fx.configDir, "blocklist.yaml"), `
+version: 1
+policy: blocklist
+domains: []
+`)
 	rec := fx.postSync(1, cookies)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first status = %d, want 200; body=%q", rec.Code, rec.Body.String())
@@ -313,8 +358,10 @@ func TestSinkSyncReloadsBlocklistBetweenRequests(t *testing.T) {
 		t.Fatalf("first sidecar hosts = %v", got)
 	}
 
+	// Second request: blocklist now has a pattern that blocks .blocked.com.
 	writeCLIFile(t, filepath.Join(fx.configDir, "blocklist.yaml"), `
 version: 1
+policy: blocklist
 domains:
   - pattern: "%.blocked.com"
 `)
@@ -497,4 +544,13 @@ func (f *sinkHandlerFixture) sidecarHosts() []string {
 	}
 	sort.Strings(hosts)
 	return hosts
+}
+
+// sidecarHostsOrEmpty returns the sidecar hosts, or an empty slice if the
+// sidecar does not exist. Used by tests that expect zero cookies written.
+func (f *sinkHandlerFixture) sidecarHostsOrEmpty() []string {
+	if _, err := os.Stat(f.sidecarPath()); os.IsNotExist(err) {
+		return nil
+	}
+	return f.sidecarHosts()
 }

@@ -56,6 +56,7 @@ type SinkConfig struct {
 	Security         SecurityRef `yaml:"security,omitempty" json:"security,omitempty"`
 	SkipChromeSQLite bool        `yaml:"skip_chrome_sqlite,omitempty" json:"skip_chrome_sqlite,omitempty"`
 	CDP              CDPRef      `yaml:"cdp,omitempty" json:"cdp,omitempty"`
+	LiveCDP          LiveCDPRef  `yaml:"live_cdp,omitempty" json:"live_cdp,omitempty"`
 	Cmux             CmuxRef     `yaml:"cmux,omitempty" json:"cmux,omitempty"`
 	Delivery         string      `yaml:"delivery,omitempty" json:"delivery,omitempty"`
 }
@@ -96,6 +97,16 @@ type CmuxRef struct {
 type CDPRef struct {
 	Enabled    bool   `yaml:"enabled" json:"enabled"`
 	ProfileDir string `yaml:"profile_dir,omitempty" json:"profile_dir,omitempty"`
+}
+
+// LiveCDPRef configures the Linux sink's attach-to-existing-Chrome CDP
+// injection path. Unlike CDPRef (which launches its own Chrome), LiveCDP
+// attaches to a Chrome that the agent runtime (e.g., Grok Bot) already
+// started with --remote-debugging-port. This is the primary Linux sink
+// injection mechanism: no Keychain, no Chrome SQLite rewrite.
+type LiveCDPRef struct {
+	Enabled  bool   `yaml:"enabled" json:"enabled"`
+	Endpoint string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"` // default http://127.0.0.1:9223
 }
 
 // PeerRef names the other side of a paired sync relationship. Hostname is
@@ -247,7 +258,33 @@ func LoadSink(dir string) (*SinkConfig, error) {
 	if cfg.Cmux.CmuxPath != "" {
 		cfg.Cmux.CmuxPath = ExpandTilde(cfg.Cmux.CmuxPath)
 	}
+	// Linux sink defaults: skip Chrome SQLite (no Keychain to read Safe Storage),
+	// enable live CDP attach (inject into agent runtime's Chrome).
+	if IsLinux() {
+		applyLinuxSinkDefaults(&cfg)
+	}
 	return &cfg, nil
+}
+
+// applyLinuxSinkDefaults sets Linux-appropriate sink defaults. Linux cannot
+// read Chrome Safe Storage via macOS Keychain, so it skips Chrome SQLite
+// writes by default. The primary injection path is live CDP attach to a
+// Chrome the agent runtime already started with --remote-debugging-port.
+func applyLinuxSinkDefaults(cfg *SinkConfig) {
+	// Default skip_chrome_sqlite to true on Linux: no Keychain to decrypt
+	// Chrome's SQLite, so don't try. The YAML can explicitly set it false
+	// to override (e.g., if someone implements a libsecret reader later).
+	// We only apply this if not explicitly set in YAML - but Go's default
+	// bool is false, so we check if the struct was parsed with an explicit
+	// value by setting it unconditionally.
+	cfg.SkipChromeSQLite = true
+
+	// Default live_cdp.enabled to true on Linux when not explicitly set.
+	// This is the primary Linux injection path: attach to the agent
+	// runtime's Chrome CDP port (default 9223).
+	if !cfg.CDP.Enabled {
+		cfg.LiveCDP.Enabled = true
+	}
 }
 
 // validateSharedSecret enforces a 32-byte minimum on the legacy

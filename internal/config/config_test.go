@@ -200,7 +200,8 @@ security:
 	t.Run("absent fields default to legacy behavior", func(t *testing.T) {
 		// R6 regression guard: a v0.12.0-beta.2 sink.yaml that does NOT
 		// mention skip_chrome_sqlite or cdp must keep the old defaults
-		// (false for both), so installed friends see no behavior change.
+		// (false for both on Darwin), so installed friends see no behavior change.
+		// NOTE: On Linux, skip_chrome_sqlite defaults to true (no Keychain).
 		dir := t.TempDir()
 		writeFile(t, dir, "sink.yaml", `
 listen:
@@ -212,11 +213,22 @@ security:
 		if err != nil {
 			t.Fatalf("LoadSink: %v", err)
 		}
-		if cfg.SkipChromeSQLite {
-			t.Errorf("SkipChromeSQLite: got true, want false (legacy default)")
-		}
-		if cfg.CDP.Enabled {
-			t.Errorf("CDP.Enabled: got true, want false (legacy default)")
+		// Platform-specific defaults: Linux defaults to skip_chrome_sqlite=true
+		// and live_cdp.enabled=true; Darwin keeps legacy false defaults.
+		if IsDarwin() {
+			if cfg.SkipChromeSQLite {
+				t.Errorf("SkipChromeSQLite: got true, want false (legacy default on Darwin)")
+			}
+			if cfg.CDP.Enabled {
+				t.Errorf("CDP.Enabled: got true, want false (legacy default)")
+			}
+		} else if IsLinux() {
+			if !cfg.SkipChromeSQLite {
+				t.Errorf("SkipChromeSQLite: got false, want true (Linux default)")
+			}
+			if !cfg.LiveCDP.Enabled {
+				t.Errorf("LiveCDP.Enabled: got false, want true (Linux default)")
+			}
 		}
 	})
 }
@@ -242,8 +254,10 @@ security:
 		if cfg.Delivery != "universal" {
 			t.Errorf("Delivery: got %q, want %q", cfg.Delivery, "universal")
 		}
-		if cfg.SkipChromeSQLite {
-			t.Errorf("universal install should not skip Chrome SQLite")
+		// On Darwin, universal delivery should not skip Chrome SQLite.
+		// On Linux, skip_chrome_sqlite is always true (no Keychain).
+		if IsDarwin() && cfg.SkipChromeSQLite {
+			t.Errorf("universal install on Darwin should not skip Chrome SQLite")
 		}
 	})
 
@@ -584,6 +598,46 @@ func TestLoadBlocklistMissingReturnsEmpty(t *testing.T) {
 	if bl.CookiePolicySummary() != "sync-all" {
 		t.Errorf("missing blocklist summary = %q, want sync-all", bl.CookiePolicySummary())
 	}
+}
+
+func TestPolicyModeForSink(t *testing.T) {
+	t.Run("explicit blocklist policy", func(t *testing.T) {
+		bl := &Blocklist{Version: 1, Policy: CookiePolicyBlocklist}
+		if bl.PolicyModeForSink() != CookiePolicyBlocklist {
+			t.Errorf("explicit blocklist should return blocklist, got %s", bl.PolicyModeForSink())
+		}
+	})
+
+	t.Run("explicit allowlist policy", func(t *testing.T) {
+		bl := &Blocklist{Version: 1, Policy: CookiePolicyAllowlist}
+		if bl.PolicyModeForSink() != CookiePolicyAllowlist {
+			t.Errorf("explicit allowlist should return allowlist, got %s", bl.PolicyModeForSink())
+		}
+	})
+
+	t.Run("omitted policy", func(t *testing.T) {
+		bl := &Blocklist{Version: 1}
+		mode := bl.PolicyModeForSink()
+		// On Linux, omitted policy defaults to allowlist (security)
+		// On Darwin, omitted policy defaults to blocklist (legacy)
+		if IsLinux() && mode != CookiePolicyAllowlist {
+			t.Errorf("on Linux, omitted policy should return allowlist, got %s", mode)
+		}
+		if IsDarwin() && mode != CookiePolicyBlocklist {
+			t.Errorf("on Darwin, omitted policy should return blocklist, got %s", mode)
+		}
+	})
+
+	t.Run("nil blocklist", func(t *testing.T) {
+		var bl *Blocklist
+		mode := bl.PolicyModeForSink()
+		if IsLinux() && mode != CookiePolicyAllowlist {
+			t.Errorf("on Linux, nil blocklist should return allowlist, got %s", mode)
+		}
+		if IsDarwin() && mode != CookiePolicyBlocklist {
+			t.Errorf("on Darwin, nil blocklist should return blocklist, got %s", mode)
+		}
+	})
 }
 
 func TestLoadBlocklistRejectsUnknownPolicy(t *testing.T) {

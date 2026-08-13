@@ -34,6 +34,26 @@ func NewBlocklistMatcher(bl *config.Blocklist) *BlocklistMatcher {
 	return &BlocklistMatcher{policy: bl.PolicyMode(), patterns: patterns}
 }
 
+// NewBlocklistMatcherForSink returns a matcher built from the given blocklist
+// with sink-specific policy defaults. On Linux, missing policy defaults to
+// allowlist (empty = ship nothing) for security. On Darwin, behavior is
+// unchanged (blocklist = sync-all by default).
+func NewBlocklistMatcherForSink(bl *config.Blocklist) *BlocklistMatcher {
+	if bl == nil {
+		if config.IsLinux() {
+			return &BlocklistMatcher{policy: config.CookiePolicyAllowlist}
+		}
+		return &BlocklistMatcher{policy: config.CookiePolicyBlocklist}
+	}
+	patterns := make([]string, 0, len(bl.Domains))
+	for _, d := range bl.Domains {
+		if d.Pattern != "" {
+			patterns = append(patterns, strings.ToLower(d.Pattern))
+		}
+	}
+	return &BlocklistMatcher{policy: bl.PolicyModeForSink(), patterns: patterns}
+}
+
 // MatchesHost reports whether host matches at least one configured pattern.
 // In blocklist mode, a match means "drop this cookie." In allowlist mode, a
 // match means "keep this cookie." Use ShouldSyncHost for policy-aware callers.

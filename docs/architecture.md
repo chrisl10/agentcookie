@@ -2,6 +2,8 @@
 
 ## The picture
 
+### macOS → macOS (continuous sync via Tailscale)
+
 ```
         SOURCE (laptop)                                  SINK (Mac mini / cloud VM)
    +---------------------------+                    +-----------------------------+
@@ -22,6 +24,33 @@
             +-----------  Tailscale tailnet  ------------------+
             |             (WireGuard, ACLs)                    |
             +--------------------------------------------------+
+```
+
+### macOS → Linux (continuous sync via Tailscale)
+
+```
+        SOURCE (laptop)                                  SINK (Linux / Grok Bot)
+   +---------------------------+                    +-----------------------------+
+   |  Chrome stable            |                    |  Chrome (--remote-debugging |
+   |    Cookies SQLite         |                    |           -port=9223)       |
+   |    Safe Storage (Keychain)|                    |                             |
+   |                           |                    |  agentcookie sink           |
+   |  agentcookie source       |                    |    - listen 100.x:9999/sync |
+   |    - read SQLite (RO)     |     AES-GCM        |    - decrypt seal           |
+   |    - decrypt w/ local key |    over HTTP       |    - filter by allowlist    |
+   |    - filter by blocklist  |    on tailnet      |    - CDP attach to Chrome   |
+   |    - wrap in envelope     | ================>  |    - Storage.setCookies per |
+   |    - seal w/ peer key     |    (WireGuard)     |      browser context        |
+   +---------------------------+                    +-----------------------------+
+            ^                                                  ^
+            |                                                  |
+            +-----------  Tailscale tailnet  ------------------+
+            |             (WireGuard, ACLs)                    |
+            +--------------------------------------------------+
+
+No Keychain, no Chrome SQLite rewrite, no libsecret. Just live CDP injection.
+Tailscale required: sink MUST bind a 100.x address (refuses to start without tailnet).
+Security: missing policy = allowlist-empty (ship nothing) on Linux.
 ```
 
 ## Module layout

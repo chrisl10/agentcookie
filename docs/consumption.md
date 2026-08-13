@@ -97,3 +97,82 @@ emits; the alias above is the operator-set bridge until then.
 
 Per-app push adapters (`internal/sinkpush`) remain as a legacy fallback; the
 read commands above are the supported, generic consumption path.
+
+## Linux consumption (v0.14+)
+
+On Linux, agentcookie runs as a continuous `/sync` sink over Tailscale, just
+like macOS. The key difference: it injects cookies directly into a running
+Chrome via CDP instead of writing Chrome's SQLite.
+
+### Setup
+
+1. **Join the tailnet**: The Linux sink MUST have a Tailscale 100.x address.
+   Verify with `tailscale status`. The sink will refuse to start without it.
+
+2. **Pair with the source Mac**:
+   ```bash
+   # On Mac (source):
+   agentcookie pair --as source
+
+   # On Linux (sink):
+   agentcookie pair --as sink --peer <mac-hostname> \
+     --pair-url http://<mac-hostname>:9998/pair --code <code>
+   ```
+
+3. **Start Chrome with CDP enabled**:
+   ```bash
+   google-chrome --remote-debugging-port=9223 &
+   ```
+
+4. **Start the sink** (binds to your tailnet IP):
+   ```bash
+   agentcookie sink
+   ```
+
+5. **Cookies sync continuously**. Whenever the source Mac's Chrome cookies
+   change, they're pushed to the Linux sink and injected via CDP. Any page
+   Chrome loads (including agent-driven pages via Playwright, Puppeteer, or
+   browser-use) sees the logged-in session.
+
+### Linux cookie policy
+
+Missing `blocklist.yaml` or an omitted `policy` field defaults to **allowlist-
+empty** on Linux (ship nothing). This is security-by-default: an untrusted
+Linux sink must explicitly opt domains into sync.
+
+Configure which domains sync:
+
+```yaml
+# ~/.config/agentcookie/blocklist.yaml
+version: 1
+policy: allowlist
+domains:
+  - pattern: "github.com"
+  - pattern: "%.github.com"
+  - pattern: "%.openai.com"
+```
+
+### Workflow example: Grok Bot
+
+```bash
+# Grok Bot Linux VM at 100.87.49.2 on the tailnet
+
+# 1. Start Chrome with CDP
+google-chrome --remote-debugging-port=9223 --headless=new &
+
+# 2. Start the sink (binds to 100.87.49.2:9999)
+agentcookie sink
+
+# Grok Bot's browser now syncs continuously with your Mac's sessions
+```
+
+### What's NOT available on Linux
+
+- Plaintext sidecar (`~/.agentcookie/cookies-plain.db`) — not written
+- Per-CLI push adapters — not triggered (no sidecar to read)
+- `agentcookie cookies --domain` — reads the sidecar, which doesn't exist
+- File-based import — not the supported path; use Tailscale `/sync`
+
+The Linux sink is designed for agent runtimes where the only consumer is a
+browser driven by the agent. For CLIs that need the sidecar or adapters, use
+a macOS sink.

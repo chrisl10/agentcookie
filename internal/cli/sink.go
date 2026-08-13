@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/mvanhorn/agentcookie/internal/cdp"
 	"github.com/mvanhorn/agentcookie/internal/chrome"
+	"github.com/mvanhorn/agentcookie/internal/livecdp"
 	"github.com/mvanhorn/agentcookie/internal/chromectl"
 	"github.com/mvanhorn/agentcookie/internal/chromedirsync"
 	"github.com/mvanhorn/agentcookie/internal/chromepaths"
@@ -68,6 +70,15 @@ func runSink(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("sink listen %q: %w", cfg.Listen.Addr, err)
 	}
 
+	// Linux sink: require Tailscale 100.x in production. Localhost is
+	// allowed for tests but is not the documented Linux sink path.
+	if config.IsLinux() {
+		host, _, _ := net.SplitHostPort(cfg.Listen.Addr)
+		if host == "127.0.0.1" || host == "::1" || host == "localhost" {
+			fmt.Fprintln(os.Stderr, "agentcookie sink: WARNING: localhost bind on Linux is for testing only. Production Linux sinks must bind a Tailscale 100.x address (run `tailscale status` to find your tailnet IP).")
+		}
+	}
+
 	// v0.12.0-beta.3 headless mode: when skip_chrome_sqlite is true, the
 	// sink never touches Chrome Safe Storage. Sidecar + adapter push are
 	// still the cookie-delivery paths. Friends running on a fully headless
@@ -88,6 +99,15 @@ func runSink(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// Log live CDP mode at startup (Linux sink's primary injection path).
+	if cfg.LiveCDP.Enabled {
+		endpoint := cfg.LiveCDP.Endpoint
+		if endpoint == "" {
+			endpoint = livecdp.DefaultCDPEndpoint
+		}
+		fmt.Fprintf(os.Stderr, "agentcookie sink: live_cdp enabled; will inject into running Chrome at %s\n", endpoint)
 	}
 	transportSecret, err := resolveTransportSecret(common.ConfigDir, cfg.Peer.Hostname, cfg.Security.SharedSecret)
 	if err != nil {
@@ -143,7 +163,7 @@ func logSinkStartupBlocklistStatus() {
 		fmt.Fprintf(os.Stderr, "agentcookie sink: cookie policy load failed; /sync will fail closed until fixed: %v\n", err)
 		return
 	}
-	blockMatcher := protocol.NewBlocklistMatcher(bl)
+	blockMatcher := protocol.NewBlocklistMatcherForSink(bl)
 	switch blockMatcher.PolicySummary() {
 	case "sync-all":
 		fmt.Fprintln(os.Stderr, "agentcookie sink: cookie policy sync-all (no patterns)")
@@ -199,7 +219,7 @@ func newSinkMux(
 			http.Error(w, "load blocklist: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		blockMatcher := protocol.NewBlocklistMatcher(bl)
+		blockMatcher := protocol.NewBlocklistMatcherForSink(bl)
 
 		if !seqTracker.Accept(envelope.SourceHostname, envelope.Sequence) {
 			http.Error(w, fmt.Sprintf("sequence %d not greater than last seen for %q (replay defense)", envelope.Sequence, envelope.SourceHostname), http.StatusConflict)
@@ -290,6 +310,25 @@ func newSinkMux(
 			} else {
 				fmt.Fprintf(os.Stderr, "agentcookie sink: CDP injection pushed %d cookies into %s\n", len(cookies), profileDir)
 				sinkState.LastWriteMode = writeMode + "+cdp"
+			}
+		}
+
+		// Linux sink: when live_cdp is enabled, attach to an already-running
+		// Chrome at the configured endpoint (default 127.0.0.1:9223) and
+		// inject cookies. This is the Linux sink's primary injection path:
+		// no Keychain, no Chrome SQLite rewrite, just live CDP injection
+		// into a Chrome that the agent runtime (e.g., Grok Bot) already
+		// started with --remote-debugging-port.
+		if cfg.LiveCDP.Enabled && len(cookies) > 0 {
+			endpoint := cfg.LiveCDP.Endpoint
+			if endpoint == "" {
+				endpoint = livecdp.DefaultCDPEndpoint
+			}
+			if n, lcdpErr := livecdp.AttachAndInject(r.Context(), endpoint, cookies); lcdpErr != nil {
+				fmt.Fprintf(os.Stderr, "agentcookie sink: live CDP injection failed (sidecar write succeeded): %v\n", lcdpErr)
+			} else {
+				fmt.Fprintf(os.Stderr, "agentcookie sink: live CDP injection pushed %d cookies into %d context(s) at %s\n", len(cookies), n, endpoint)
+				sinkState.LastWriteMode = writeMode + "+livecdp"
 			}
 		}
 

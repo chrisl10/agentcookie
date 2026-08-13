@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    name: vet + test
+  test-macos:
+    name: vet + test (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,5 +20,23 @@ jobs:
         run: go vet ./...
       - name: go test
         run: go test -race ./...
+      - name: go build
+        run: go build ./...
+
+  test-linux:
+    name: vet + test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      # Linux tests run without -race to avoid CGO requirements for some
+      # macOS-specific code paths that are stubbed but still compiled.
+      - name: go test
+        run: go test ./...
       - name: go build
         run: go build ./...

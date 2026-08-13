@@ -75,6 +75,20 @@ func (bl *Blocklist) PolicyMode() CookiePolicy {
 	return bl.Policy
 }
 
+// PolicyModeForSink returns the effective cookie filter policy for sink-side
+// cookie filtering. On Linux (untrusted sink), missing policy defaults to
+// allowlist (empty = ship nothing) for security. On Darwin, behavior is
+// unchanged (blocklist = sync-all by default).
+func (bl *Blocklist) PolicyModeForSink() CookiePolicy {
+	if bl == nil || bl.Policy == "" {
+		if IsLinux() {
+			return CookiePolicyAllowlist
+		}
+		return CookiePolicyBlocklist
+	}
+	return bl.Policy
+}
+
 // CookiePolicySummary returns the operator-facing policy label.
 func (bl *Blocklist) CookiePolicySummary() string {
 	if bl == nil {

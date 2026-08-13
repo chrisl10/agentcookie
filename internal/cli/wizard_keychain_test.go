@@ -278,14 +278,16 @@ func TestKeychainStrategyMode_Routing(t *testing.T) {
 }
 
 func TestRunInlinePartitionAccess_SetsTeamPartitionNoDelete(t *testing.T) {
-	origTeam, origSet, origVerify, origPw, origSec := resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc, execSecurityFunc
+	origTeam, origSet, origVerify, origPw, origSec, origCount := resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc, execSecurityFunc, countSafeStorageItemsFunc
 	defer func() {
-		resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc, execSecurityFunc = origTeam, origSet, origVerify, origPw, origSec
+		resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc, execSecurityFunc, countSafeStorageItemsFunc = origTeam, origSet, origVerify, origPw, origSec, origCount
 	}()
 
 	resolveTeamFunc = func(string) (string, error) { return "NM8VT393AR", nil }
 	acquireLoginPasswordFunc = func() (string, error) { return "pw", nil }
 	verifyPartitionReadFunc = func() error { return nil }
+	// Mock the converge step's count check - report exactly 1 item (no duplicates to converge).
+	countSafeStorageItemsFunc = func() (int, error) { return 1, nil }
 
 	var gotPartitions, gotPw string
 	setPartitionWithPwFunc = func(partitions, pw string) error {
@@ -316,13 +318,15 @@ func TestRunInlinePartitionAccess_SetsTeamPartitionNoDelete(t *testing.T) {
 }
 
 func TestRunInlinePartitionAccess_EmptyTeamFallsBackToDefaultPartition(t *testing.T) {
-	origTeam, origSet, origVerify, origPw := resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc
+	origTeam, origSet, origVerify, origPw, origCount := resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc, countSafeStorageItemsFunc
 	defer func() {
-		resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc = origTeam, origSet, origVerify, origPw
+		resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc, countSafeStorageItemsFunc = origTeam, origSet, origVerify, origPw, origCount
 	}()
 	resolveTeamFunc = func(string) (string, error) { return "", nil } // ad-hoc binary
 	acquireLoginPasswordFunc = func() (string, error) { return "pw", nil }
 	verifyPartitionReadFunc = func() error { return nil }
+	// Mock the converge step's count check - report exactly 1 item (no duplicates to converge).
+	countSafeStorageItemsFunc = func() (int, error) { return 1, nil }
 	var gotPartitions string
 	setPartitionWithPwFunc = func(partitions, _ string) error { gotPartitions = partitions; return nil }
 
@@ -353,13 +357,15 @@ func TestRunInlinePartitionAccess_NoPasswordReturnsActionableError(t *testing.T)
 }
 
 func TestRunInlinePartitionAccess_VerifyFailureIsNonFatal(t *testing.T) {
-	origTeam, origSet, origVerify, origPw := resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc
+	origTeam, origSet, origVerify, origPw, origCount := resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc, countSafeStorageItemsFunc
 	defer func() {
-		resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc = origTeam, origSet, origVerify, origPw
+		resolveTeamFunc, setPartitionWithPwFunc, verifyPartitionReadFunc, acquireLoginPasswordFunc, countSafeStorageItemsFunc = origTeam, origSet, origVerify, origPw, origCount
 	}()
 	resolveTeamFunc = func(string) (string, error) { return "NM8VT393AR", nil }
 	acquireLoginPasswordFunc = func() (string, error) { return "pw", nil }
 	setPartitionWithPwFunc = func(string, string) error { return nil }
+	// Mock the converge step's count check - report exactly 1 item (no duplicates to converge).
+	countSafeStorageItemsFunc = func() (int, error) { return 1, nil }
 	// Verification read fails (e.g. SSH keychain re-locked) -- must NOT fail the step.
 	verifyPartitionReadFunc = func() error { return fmt.Errorf("interaction not allowed") }
 
