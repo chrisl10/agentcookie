@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -342,6 +343,15 @@ func buildReport(d doctorDeps) DoctorReport {
 			Detail:   "source-only install",
 		})
 	}
+
+	// 15. Chrome stores -- lists discovered Chrome profile stores and
+	// skip reasons. Informational (INFO/OK), never FAIL.
+	// Include config's CDP.ProfileDir if set.
+	cdpProfileDir := ""
+	if sinkCfg != nil {
+		cdpProfileDir = sinkCfg.CDP.ProfileDir
+	}
+	checks = append(checks, checkChromeStores(cdpProfileDir))
 
 	exit := 0
 	for _, c := range checks {
@@ -1547,6 +1557,116 @@ func checkCookieDeliveryWith(sinkCfg *config.SinkConfig, probe func() (int, erro
 		Severity:    SeverityWarn,
 		Detail:      "partial: real Default profile written but the Chrome Safe Storage key has not been granted to cookie readers; unmodified cookie CLIs can't decrypt synced cookies",
 		Remediation: onePasswordGrantRemediation,
+	}
+}
+
+// checkChromeStores lists discovered Chrome profile stores and skip reasons.
+// This is the v0.8 feature that finds Chrome user-data-dirs beyond the
+// Default profile, including agent Chromes that have Cookies but no Local
+// State. Never FAIL; OK when stores found, INFO when stores skipped or on
+// Linux (no decrypt), SKIPPED when no Chrome detected.
+// profileDir is passed to DiscoverForConfig to include a configured CDP profile.
+func checkChromeStores(profileDir string) Check {
+	result := chromepaths.DiscoverForConfig(profileDir)
+
+	if len(result.Stores) == 0 && len(result.Skipped) == 0 {
+		return Check{
+			Name:     "Chrome stores",
+			Severity: SeveritySkipped,
+			Detail:   "no Chrome profile directories detected",
+		}
+	}
+
+	// On Linux, we can discover stores but can't decrypt them.
+	if runtime.GOOS == "linux" {
+		var storeNames []string
+		for _, s := range result.Stores {
+			label := s.Browser + "/" + s.Profile
+			if s.IsDefault {
+				label += " (default)"
+			}
+			storeNames = append(storeNames, label)
+		}
+		if len(storeNames) > 3 {
+			storeNames = append(storeNames[:3], fmt.Sprintf("+%d more", len(result.Stores)-3))
+		}
+
+		detail := fmt.Sprintf("%d profile(s) found, decrypt not supported on Linux (sidecar-only)", len(result.Stores))
+		if len(storeNames) > 0 {
+			detail = fmt.Sprintf("%d profile(s) found: %s; decrypt not supported on Linux (sidecar-only)",
+				len(result.Stores), strings.Join(storeNames, ", "))
+		}
+
+		return Check{
+			Name:     "Chrome stores",
+			Severity: SeverityInfo,
+			Detail:   detail,
+		}
+	}
+
+	// Darwin: list stores and note which are readable.
+	var readable, unreadable []string
+	for _, s := range result.Stores {
+		label := s.Browser + "/" + s.Profile
+		if s.IsDefault {
+			label += " (default)"
+		}
+		// Try to get the decrypt key for this browser.
+		browser, err := chrome.LookupBrowser(s.Browser)
+		if err != nil {
+			unreadable = append(unreadable, label+": unsupported browser")
+			continue
+		}
+		_, err = chrome.SafeStoragePasswordFor(browser)
+		if err != nil {
+			if chrome.IsKeychainLocked(err) {
+				unreadable = append(unreadable, label+": keychain locked")
+			} else {
+				unreadable = append(unreadable, label+": keychain access denied")
+			}
+			continue
+		}
+		readable = append(readable, label)
+	}
+
+	// Add skipped stores.
+	for _, s := range result.Skipped {
+		label := s.Profile
+		if s.Root != "" {
+			label = filepath.Base(s.Root) + "/" + s.Profile
+		}
+		unreadable = append(unreadable, label+": "+s.Reason)
+	}
+
+	// Truncate long lists.
+	if len(readable) > 5 {
+		readable = append(readable[:5], fmt.Sprintf("+%d more", len(result.Stores)-5))
+	}
+	if len(unreadable) > 3 {
+		unreadable = append(unreadable[:3], fmt.Sprintf("+%d more", len(result.Skipped)+len(result.Stores)-len(readable)-3))
+	}
+
+	var parts []string
+	if len(readable) > 0 {
+		parts = append(parts, fmt.Sprintf("readable: %s", strings.Join(readable, ", ")))
+	}
+	if len(unreadable) > 0 {
+		parts = append(parts, fmt.Sprintf("skipped: %s", strings.Join(unreadable, ", ")))
+	}
+
+	if len(readable) == 0 && len(unreadable) > 0 {
+		return Check{
+			Name:        "Chrome stores",
+			Severity:    SeverityWarn,
+			Detail:      fmt.Sprintf("0 readable store(s); %s", strings.Join(parts, "; ")),
+			Remediation: "grant agentcookie access to Chrome Safe Storage keychain, or use the sidecar",
+		}
+	}
+
+	return Check{
+		Name:     "Chrome stores",
+		Severity: SeverityOK,
+		Detail:   fmt.Sprintf("%d readable store(s); %s", len(readable), strings.Join(parts, "; ")),
 	}
 }
 

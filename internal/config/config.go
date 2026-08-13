@@ -344,6 +344,8 @@ func DefaultChromeCookiesPath() string {
 
 // SourceBrowserCookiesPath returns the Cookies SQLite path for the configured
 // source browser. Empty name/profile default to Chrome/Default.
+// On macOS: ~/Library/Application Support/<browser>/<profile>/Cookies
+// On Linux: ~/.config/<browser>/<profile>/Cookies
 func SourceBrowserCookiesPath(name, profile string) (string, error) {
 	ref, err := lookupSourceBrowserPath(name)
 	if err != nil {
@@ -356,10 +358,44 @@ func SourceBrowserCookiesPath(name, profile string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	parts := []string{home, "Library", "Application Support"}
-	parts = append(parts, ref.SupportDir...)
+	var parts []string
+	if IsLinux() {
+		parts = []string{home, ".config"}
+		parts = append(parts, linuxSupportDir(ref.SupportDir)...)
+	} else {
+		parts = []string{home, "Library", "Application Support"}
+		parts = append(parts, ref.SupportDir...)
+	}
 	parts = append(parts, profile, "Cookies")
 	return filepath.Join(parts...), nil
+}
+
+// linuxSupportDir converts macOS Application Support subdirectory names to
+// their Linux ~/.config equivalents.
+func linuxSupportDir(macDirs []string) []string {
+	if len(macDirs) == 0 {
+		return macDirs
+	}
+	// Map known macOS paths to Linux equivalents.
+	switch macDirs[0] {
+	case "Google":
+		if len(macDirs) >= 2 && macDirs[1] == "Chrome" {
+			return []string{"google-chrome"}
+		}
+		return macDirs
+	case "Chromium":
+		return []string{"chromium"}
+	case "BraveSoftware":
+		return macDirs // Same structure on Linux
+	case "Microsoft Edge":
+		return []string{"microsoft-edge"}
+	case "com.openai.atlas":
+		return macDirs // Atlas is macOS-only
+	case "Arc":
+		return macDirs // Arc is macOS-only
+	default:
+		return macDirs
+	}
 }
 
 func lookupSourceBrowserPath(name string) (browserPathRef, error) {

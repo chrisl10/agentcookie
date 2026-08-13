@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -125,15 +126,51 @@ func SupportedBrowserNames() []string {
 
 // ProfileDir returns this browser's profile directory. Empty profile defaults
 // to "Default".
+// On macOS: ~/Library/Application Support/<browser>/<profile>
+// On Linux: ~/.config/<browser>/<profile>
 func (b Browser) ProfileDir(profile string) string {
 	if profile == "" {
 		profile = defaultBrowserProfile
 	}
 	home, _ := os.UserHomeDir()
-	parts := []string{home, "Library", "Application Support"}
-	parts = append(parts, b.SupportDir...)
+	var parts []string
+	if isLinux() {
+		parts = []string{home, ".config"}
+		parts = append(parts, linuxSupportDir(b.SupportDir)...)
+	} else {
+		parts = []string{home, "Library", "Application Support"}
+		parts = append(parts, b.SupportDir...)
+	}
 	parts = append(parts, profile)
 	return filepath.Join(parts...)
+}
+
+// isLinux reports whether the current OS is Linux.
+func isLinux() bool {
+	return os.Getenv("GOOS") == "linux" || (os.Getenv("GOOS") == "" && runtime.GOOS == "linux")
+}
+
+// linuxSupportDir converts macOS Application Support subdirectory names to
+// their Linux ~/.config equivalents.
+func linuxSupportDir(macDirs []string) []string {
+	if len(macDirs) == 0 {
+		return macDirs
+	}
+	switch macDirs[0] {
+	case "Google":
+		if len(macDirs) >= 2 && macDirs[1] == "Chrome" {
+			return []string{"google-chrome"}
+		}
+		return macDirs
+	case "Chromium":
+		return []string{"chromium"}
+	case "BraveSoftware":
+		return macDirs
+	case "Microsoft Edge":
+		return []string{"microsoft-edge"}
+	default:
+		return macDirs
+	}
 }
 
 // CookiesPath returns this browser's Cookies SQLite path for profile. Empty

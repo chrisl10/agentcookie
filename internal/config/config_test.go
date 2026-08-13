@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -59,7 +60,15 @@ security:
 		t.Errorf("browser ref: got %+v", cfg.Browser)
 	}
 	home, _ := os.UserHomeDir()
-	want := filepath.Join(home, "Library", "Application Support", "com.openai.atlas", "browser-data", "host", "Profile 1", "Cookies")
+	// Atlas paths are the same on macOS and Linux (Atlas is macOS-only,
+	// but the path derivation code passes the macOS segments through on Linux
+	// since there's no Linux equivalent).
+	var want string
+	if runtime.GOOS == "linux" {
+		want = filepath.Join(home, ".config", "com.openai.atlas", "browser-data", "host", "Profile 1", "Cookies")
+	} else {
+		want = filepath.Join(home, "Library", "Application Support", "com.openai.atlas", "browser-data", "host", "Profile 1", "Cookies")
+	}
 	if cfg.Chrome.DBPath != want {
 		t.Errorf("derived DBPath: got %q, want %q", cfg.Chrome.DBPath, want)
 	}

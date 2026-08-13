@@ -753,9 +753,9 @@ peer:
 	// the cmux delivery check. Browser-bound-session honesty added the cmux
 	// session health check (source role only; present here since this fixture
 	// is source). Linux sink polish added Live CDP endpoint + Daemon binary
-	// path checks.
-	if got := len(report.Checks); got != 22 {
-		t.Fatalf("got %d checks, want 22", got)
+	// path checks. Chrome extra profile discovery added the Chrome stores check.
+	if got := len(report.Checks); got != 23 {
+		t.Fatalf("got %d checks, want 23", got)
 	}
 
 	// Serialize the envelope and confirm it round-trips.

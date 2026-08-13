@@ -31,12 +31,37 @@ type InstacartAdapter struct {
 	binary string
 }
 
-// NewInstacart returns an adapter pointing at the default install
-// location (~/go/bin/instacart-pp-cli). Honors $HOME for the user
-// resolution.
+// NewInstacart returns an adapter that finds the instacart CLI. It checks:
+// 1. ~/go/bin/instacart-pp-cli (the canonical go install location)
+// 2. `instacart-pp-cli` on PATH via exec.LookPath
+// 3. `instacart` on PATH (common alias name)
 func NewInstacart() *InstacartAdapter {
+	return &InstacartAdapter{binary: findInstacartBinary()}
+}
+
+// findInstacartBinary locates the instacart CLI binary. Returns an empty
+// string if not found, in which case IsInstalled() will return false.
+func findInstacartBinary() string {
 	home, _ := os.UserHomeDir()
-	return &InstacartAdapter{binary: filepath.Join(home, "go", "bin", "instacart-pp-cli")}
+
+	// 1. Check the canonical go install location.
+	defaultPath := filepath.Join(home, "go", "bin", "instacart-pp-cli")
+	if info, err := os.Stat(defaultPath); err == nil && !info.IsDir() {
+		return defaultPath
+	}
+
+	// 2. Check PATH for instacart-pp-cli.
+	if p, err := exec.LookPath("instacart-pp-cli"); err == nil {
+		return p
+	}
+
+	// 3. Check PATH for the `instacart` alias.
+	if p, err := exec.LookPath("instacart"); err == nil {
+		return p
+	}
+
+	// Not found - return the default path so error messages reference it.
+	return defaultPath
 }
 
 func (a *InstacartAdapter) Name() string { return "instacart-pp-cli" }
@@ -44,6 +69,9 @@ func (a *InstacartAdapter) Name() string { return "instacart-pp-cli" }
 func (a *InstacartAdapter) CLIBinary() string { return a.binary }
 
 func (a *InstacartAdapter) IsInstalled() bool {
+	if a.binary == "" {
+		return false
+	}
 	info, err := os.Stat(a.binary)
 	return err == nil && !info.IsDir()
 }
