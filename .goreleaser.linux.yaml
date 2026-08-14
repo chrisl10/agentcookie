@@ -7,26 +7,35 @@ before:
     - go mod tidy
 
 builds:
-  # Darwin build: runs on macos-latest, codesigned
-  - id: agentcookie-darwin
+  # Linux amd64 build: runs on ubuntu-latest with default gcc
+  - id: agentcookie-linux-amd64
     main: ./cmd/agentcookie
     binary: agentcookie
     env:
       - CGO_ENABLED=1
     goos:
-      - darwin
+      - linux
     goarch:
-      - arm64
       - amd64
     ldflags:
       - -s -w -X github.com/mvanhorn/agentcookie/internal/cli.Version={{ .Version }}
-    hooks:
-      post:
-        - cmd: scripts/sign.sh {{ .Path }}
-          output: true
+
+  # Linux arm64 build: runs on ubuntu-latest with cross-compiler
+  - id: agentcookie-linux-arm64
+    main: ./cmd/agentcookie
+    binary: agentcookie
+    env:
+      - CGO_ENABLED=1
+      - CC=aarch64-linux-gnu-gcc
+    goos:
+      - linux
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w -X github.com/mvanhorn/agentcookie/internal/cli.Version={{ .Version }}
 
 archives:
-  - id: agentcookie
+  - id: agentcookie-linux
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE
@@ -39,7 +48,6 @@ archives:
       - examples/source.yaml
       - examples/sink.yaml
       - examples/blocklist.yaml
-      - examples/launchd-sink.plist
 
 checksum:
   name_template: checksums.txt
