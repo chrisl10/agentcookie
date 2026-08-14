@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -335,9 +337,24 @@ func newSinkMux(
 		// headlessly on this sink with zero per-binary Keychain prompts.
 		// Adapter failures are reported but do not block the sync. See
 		// plan 2026-05-17-007.
+		//
+		// v0.15: union envelope cookies with extra Chrome profiles discovered
+		// on this sink machine before running adapters. This ensures adapters
+		// see the same cookie set that `cookies --domain` outputs, including
+		// extra-profile cookies (Darwin only; Linux uses sidecar/plaintext).
+		//
+		// P1 fix: union first, then check length. This ensures extra-profile
+		// cookies are processed even when the envelope is empty/fully filtered.
+		// The union function also filters extra-profile cookies through the
+		// blocklist so opted-out domains never reach adapters.
 		var adapterResults []sinkpush.Result
-		if len(cookies) > 0 {
-			adapterResults = sinkpush.RunAll(cookies)
+		profileDir := ""
+		if cfg.CDP.ProfileDir != "" {
+			profileDir = cfg.CDP.ProfileDir
+		}
+		unionedCookies := unionCookiesWithExtraProfiles(cookies, profileDir, blockMatcher)
+		if len(unionedCookies) > 0 {
+			adapterResults = sinkpush.RunAll(unionedCookies)
 			logAdapterResults(adapterResults)
 		}
 
@@ -634,4 +651,110 @@ func replaceLevelDBDir(payload []byte, liveDir string) (int, error) {
 		return originCount, err
 	}
 	return originCount, nil
+}
+
+// unionCookiesWithExtraProfiles unions the envelope cookies (from source sync)
+// with any extra Chrome profiles discovered on the sink machine. The envelope
+// cookies (which live in the sidecar) take priority on host+name+path collisions.
+// The blockMatcher filters extra-profile cookies through the same blocklist
+// that envelope cookies use, ensuring opted-out domains never reach adapters.
+//
+// On Darwin, extra profiles are decrypted via the existing Keychain path.
+// On Linux, only envelope cookies are returned (Chrome SQLite decrypt requires
+// libsecret, which is not implemented; doctor already names this limitation).
+//
+// This ensures that adapters (via sinkpush.RunAll) see the same cookie union
+// that `cookies --domain` outputs, including extra-profile cookies.
+func unionCookiesWithExtraProfiles(envelopeCookies []chrome.Cookie, profileDir string, blockMatcher *protocol.BlocklistMatcher) []chrome.Cookie {
+	if runtime.GOOS != "darwin" {
+		// Linux: no Chrome SQLite decrypt support. Sidecar/plaintext only.
+		return envelopeCookies
+	}
+
+	// Build a seen map with host+name+path as the key. Envelope/sidecar
+	// cookies go first and win on collisions.
+	seen := make(map[string]bool)
+	for _, c := range envelopeCookies {
+		key := cookieDedupeKey(c)
+		seen[key] = true
+	}
+
+	// Discover extra Chrome profiles on this machine.
+	discovery := chromepaths.DiscoverForConfig(profileDir)
+
+	// Group stores by browser to reuse decryption keys.
+	browserStores := make(map[string][]chromepaths.Store)
+	for _, store := range discovery.Stores {
+		browserStores[store.Browser] = append(browserStores[store.Browser], store)
+	}
+
+	// Sort browser names for deterministic iteration order.
+	browserNames := make([]string, 0, len(browserStores))
+	for name := range browserStores {
+		browserNames = append(browserNames, name)
+	}
+	sort.Strings(browserNames)
+
+	var extraCookies []chrome.Cookie
+	for _, browserName := range browserNames {
+		stores := browserStores[browserName]
+
+		// Sort stores: Default first, then alphabetically by profile name.
+		sort.Slice(stores, func(i, j int) bool {
+			if stores[i].IsDefault != stores[j].IsDefault {
+				return stores[i].IsDefault
+			}
+			if stores[i].Profile != stores[j].Profile {
+				return stores[i].Profile < stores[j].Profile
+			}
+			return stores[i].CookiesPath < stores[j].CookiesPath
+		})
+
+		key, err := getChromeDecryptKey(browserName)
+		if err != nil {
+			// Can't decrypt this browser's cookies - skip all its stores.
+			continue
+		}
+
+		for _, store := range stores {
+			cookies, err := chrome.ReadCookiesForHost(store.CookiesPath, "%", key)
+			if err != nil {
+				// Skip this store on error (locked, corrupt, etc.)
+				continue
+			}
+
+			for _, c := range cookies {
+				if c.Value == "" {
+					continue
+				}
+				// P1 fix: filter extra-profile cookies through the blocklist
+				// so opted-out domains never reach adapters.
+				if blockMatcher != nil && !blockMatcher.ShouldSyncHost(c.HostKey) {
+					continue
+				}
+				cookieKey := cookieDedupeKey(c)
+				if seen[cookieKey] {
+					continue
+				}
+				seen[cookieKey] = true
+				extraCookies = append(extraCookies, c)
+			}
+		}
+	}
+
+	if len(extraCookies) == 0 {
+		return envelopeCookies
+	}
+
+	// Combine: envelope cookies first (they win), then extra profile cookies.
+	result := make([]chrome.Cookie, 0, len(envelopeCookies)+len(extraCookies))
+	result = append(result, envelopeCookies...)
+	result = append(result, extraCookies...)
+	return result
+}
+
+// cookieDedupeKey returns a deduplication key for a cookie. Uses host+name+path
+// to avoid dropping path-scoped twins (e.g., "/" vs "/api" on same host+name).
+func cookieDedupeKey(c chrome.Cookie) string {
+	return c.HostKey + "\x00" + c.Name + "\x00" + c.Path
 }
