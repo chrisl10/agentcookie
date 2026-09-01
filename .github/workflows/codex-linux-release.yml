@@ -22,6 +22,12 @@ env:
   PROVENANCE_BUNDLE_NAME: agentcookie_1.1.0-codex.1_linux_amd64.provenance.json
   SBOM_ATTESTATION_BUNDLE_NAME: agentcookie_1.1.0-codex.1_linux_amd64.sbom-attestation.json
   SIGNER_WORKFLOW: chrisl10/agentcookie/.github/workflows/codex-linux-release.yml
+  # actions/checkout writes safe.directory into a temporary HOME that is
+  # removed before later container steps. Keep Git trust scoped to this exact
+  # checked-out workspace without mutating the runner's persistent config.
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: safe.directory
+  GIT_CONFIG_VALUE_0: ${{ github.workspace }}
 
 jobs:
   verify:
