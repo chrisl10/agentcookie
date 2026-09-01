@@ -21,6 +21,7 @@ PATCHED_FILES=(
   docs/quickstart-beta.md
   docs/quickstart.md
   docs/runbook-v0.9-soup-to-nuts.md
+  go.mod
   internal/cli/pair.go
   internal/cli/sink.go
   internal/cli/sink_hardened_test.go
@@ -54,6 +55,7 @@ ALLOWED_DELTA=(
   docs/quickstart-beta.md
   docs/quickstart.md
   docs/runbook-v0.9-soup-to-nuts.md
+  go.mod
   internal/cli/pair.go
   internal/cli/sink.go
   internal/cli/sink_hardened_test.go
@@ -175,6 +177,10 @@ check_locks() {
   [[ -f "$WORKFLOW_FILE" ]] || die "release workflow is absent"
   [[ "$(grep -Fxc "      image: ${CODEX_BUILD_CONTAINER_IMAGE}" "$WORKFLOW_FILE")" -eq 3 ]] \
     || die "workflow build containers drifted from the lock"
+  [[ "$(grep -Fxc '      options: --platform linux/amd64 --user 1001:1001' "$WORKFLOW_FILE")" -eq 3 ]] \
+    || die "workflow build containers are not locked to the non-root release user"
+  [[ "$(grep -Fxc '      GOCACHE: /tmp/agentcookie-go-build' "$WORKFLOW_FILE")" -eq 3 ]] \
+    || die "workflow build caches are not scoped to the writable ephemeral path"
   ! grep -Eq 'uses:[[:space:]]+[^[:space:]]+@(main|master|v[0-9]+)$' "$WORKFLOW_FILE" \
     || die "workflow contains a floating action reference"
   grep -Fq "refs/tags/${CODEX_RELEASE_TAG}" "$WORKFLOW_FILE" \

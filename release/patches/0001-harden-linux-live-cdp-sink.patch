@@ -244,8 +244,20 @@ index 3ea14ae36ff1648ca75609007e8d4d29ad400392..30724c50cf1d5f80d265c16e43ed347b
  ```
  
  If pairing already exists, the wizard skips that and just runs the
+diff --git a/go.mod b/go.mod
+index ca2db38c2f4c448ea82dac6f95f56a3dfa8d1896..74e5180b6754c9d0314843458bb3f5237f9c69b1 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,6 @@
+ module github.com/mvanhorn/agentcookie
+ 
+-go 1.26.4
++go 1.26.7
+ 
+ require (
+ 	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
 diff --git a/internal/cli/pair.go b/internal/cli/pair.go
-index 6066319d1759f23e123fbd79d2670180e1e61a79..536d61cc4266dd4ccea9709ac9e9c815c782e79b 100644
+index 6066319d1759f23e123fbd79d2670180e1e61a79..7c5fb8f7f267ca6b2ab2cb7f7b61b32bddc473cc 100644
 --- a/internal/cli/pair.go
 +++ b/internal/cli/pair.go
 @@ -1,15 +1,19 @@
@@ -366,7 +378,7 @@ index 6066319d1759f23e123fbd79d2670180e1e61a79..536d61cc4266dd4ccea9709ac9e9c815
  	if err := keystore.Save(common.ConfigDir, pk); err != nil {
  		return fmt.Errorf("save key: %w", err)
  	}
-@@ -134,3 +160,31 @@ func runPairAsSink(ctx context.Context) error {
+@@ -134,3 +160,33 @@ func runPairAsSink(ctx context.Context) error {
  	fmt.Fprintf(os.Stderr, "  key saved to %s/keys/%s.json (mode 0600)\n", common.ConfigDir, pairPeerHost)
  	return nil
  }
@@ -392,7 +404,9 @@ index 6066319d1759f23e123fbd79d2670180e1e61a79..536d61cc4266dd4ccea9709ac9e9c815
 +		return "", fmt.Errorf("pairing code from stdin is too short")
 +	}
 +	for _, character := range code {
-+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-') {
++		if (character < 'a' || character > 'z') &&
++			(character < 'A' || character > 'Z') &&
++			(character < '0' || character > '9') && character != '-' {
 +			return "", fmt.Errorf("pairing code from stdin has invalid characters")
 +		}
 +	}

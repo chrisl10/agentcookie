@@ -34,9 +34,15 @@ jobs:
     name: verify source and dependencies
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      HOME: /tmp/agentcookie-home
+      GOCACHE: /tmp/agentcookie-go-build
+      GOMODCACHE: /tmp/agentcookie-go-mod
+      GOPATH: /tmp/agentcookie-go
+      RUNNER_TEMP: /tmp
     container:
       image: docker.io/library/golang@sha256:659cc38c1a394eeb4dd7e31fff6df128bd33444dcc7afd70e3bed5225749dbc0
-      options: --platform linux/amd64
+      options: --platform linux/amd64 --user 1001:1001
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
@@ -52,13 +58,19 @@ jobs:
     needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      HOME: /tmp/agentcookie-home
+      GOCACHE: /tmp/agentcookie-go-build
+      GOMODCACHE: /tmp/agentcookie-go-mod
+      GOPATH: /tmp/agentcookie-go
+      RUNNER_TEMP: /tmp
     strategy:
       fail-fast: false
       matrix:
         replica: [a, b]
     container:
       image: docker.io/library/golang@sha256:659cc38c1a394eeb4dd7e31fff6df128bd33444dcc7afd70e3bed5225749dbc0
-      options: --platform linux/amd64
+      options: --platform linux/amd64 --user 1001:1001
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
@@ -82,9 +94,15 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      HOME: /tmp/agentcookie-home
+      GOCACHE: /tmp/agentcookie-go-build
+      GOMODCACHE: /tmp/agentcookie-go-mod
+      GOPATH: /tmp/agentcookie-go
+      RUNNER_TEMP: /tmp
     container:
       image: docker.io/library/golang@sha256:659cc38c1a394eeb4dd7e31fff6df128bd33444dcc7afd70e3bed5225749dbc0
-      options: --platform linux/amd64
+      options: --platform linux/amd64 --user 1001:1001
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0

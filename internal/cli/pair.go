@@ -182,7 +182,9 @@ func readPairingCode(input io.Reader) (pairing.Code, error) {
 		return "", fmt.Errorf("pairing code from stdin is too short")
 	}
 	for _, character := range code {
-		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-') {
+		if (character < 'a' || character > 'z') &&
+			(character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && character != '-' {
 			return "", fmt.Errorf("pairing code from stdin has invalid characters")
 		}
 	}
