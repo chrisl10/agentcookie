@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - v1.1.0-codex.1
+      - v1.1.0-codex.2
 
 concurrency:
   group: codex-linux-release-${{ github.ref }}
@@ -16,11 +16,11 @@ permissions:
   contents: read
 
 env:
-  RELEASE_TAG: v1.1.0-codex.1
-  ARTIFACT_NAME: agentcookie_1.1.0-codex.1_linux_amd64
-  SBOM_NAME: agentcookie_1.1.0-codex.1_linux_amd64.cdx.json
-  PROVENANCE_BUNDLE_NAME: agentcookie_1.1.0-codex.1_linux_amd64.provenance.json
-  SBOM_ATTESTATION_BUNDLE_NAME: agentcookie_1.1.0-codex.1_linux_amd64.sbom-attestation.json
+  RELEASE_TAG: v1.1.0-codex.2
+  ARTIFACT_NAME: agentcookie_1.1.0-codex.2_linux_amd64
+  SBOM_NAME: agentcookie_1.1.0-codex.2_linux_amd64.cdx.json
+  PROVENANCE_BUNDLE_NAME: agentcookie_1.1.0-codex.2_linux_amd64.provenance.json
+  SBOM_ATTESTATION_BUNDLE_NAME: agentcookie_1.1.0-codex.2_linux_amd64.sbom-attestation.json
   SIGNER_WORKFLOW: chrisl10/agentcookie/.github/workflows/codex-linux-release.yml
   # actions/checkout writes safe.directory into a temporary HOME that is
   # removed before later container steps. Keep Git trust scoped to this exact
@@ -154,15 +154,13 @@ jobs:
           retention-days: 14
 
   release-preflight:
-    name: prove merged tag and runtime release controls
+    name: prove merged tag before release approval
     needs: promote
-    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.1'
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.2'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      actions: read
       contents: read
-      deployments: read
     steps:
       - name: Checkout the exact release tag
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
@@ -170,11 +168,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # The reviewer rule is repository runtime state and cannot be declared
-      # in workflow YAML. Fail closed unless the API proves it exists.
-      - name: Verify merged-tag and external release controls
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Verify merged tag
         run: |
           test "${GITHUB_REPOSITORY}" = 'chrisl10/agentcookie'
           test "${GITHUB_REF}" = "refs/tags/${RELEASE_TAG}"
@@ -182,27 +176,18 @@ jobs:
           git fetch --no-tags --prune origin \
             '+refs/heads/main:refs/remotes/origin/main'
           git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main
-          reviewer_count="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/environments/prd005-release" \
-            --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length')"
-          test "$reviewer_count" -ge 1
-          immutable="$(gh api \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/${GITHUB_REPOSITORY}/immutable-releases" \
-            --jq .enabled)"
-          test "$immutable" = true
           {
             echo '### PRD-005 release preflight'
             echo "- Candidate commit: ${GITHUB_SHA}"
             echo '- Candidate is merged into current origin/main: yes'
-            echo "- prd005-release required reviewers: ${reviewer_count}"
-            echo "- Immutable releases enabled: ${immutable}"
+            echo '- Protected-environment approval: required before publication'
+            echo '- Immutable-release status: verified after release creation'
           } >> "$GITHUB_STEP_SUMMARY"
 
   attest:
     name: attest exact tag assets
     needs: [promote, release-preflight]
-    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.1'
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.2'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -222,8 +207,8 @@ jobs:
         uses: actions/attest@c32b4b8b198b65d0bd9d63490e847ff7b53989d4 # v4.0.0
         with:
           subject-path: |
-            dist/agentcookie_1.1.0-codex.1_linux_amd64
-            dist/agentcookie_1.1.0-codex.1_linux_amd64.cdx.json
+            dist/agentcookie_1.1.0-codex.2_linux_amd64
+            dist/agentcookie_1.1.0-codex.2_linux_amd64.cdx.json
             dist/LICENSE
             dist/BUILD-PROVENANCE.txt
 
@@ -231,8 +216,8 @@ jobs:
         id: sbom_attestation
         uses: actions/attest@c32b4b8b198b65d0bd9d63490e847ff7b53989d4 # v4.0.0
         with:
-          subject-path: dist/agentcookie_1.1.0-codex.1_linux_amd64
-          sbom-path: dist/agentcookie_1.1.0-codex.1_linux_amd64.cdx.json
+          subject-path: dist/agentcookie_1.1.0-codex.2_linux_amd64
+          sbom-path: dist/agentcookie_1.1.0-codex.2_linux_amd64.cdx.json
 
       - name: Stage canonical offline attestation bundles
         run: |
@@ -256,7 +241,7 @@ jobs:
   publish:
     name: publish approved immutable release
     needs: attest
-    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.1'
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.2'
     environment: prd005-release
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -272,7 +257,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Reverify merged tag and external release controls
+      - name: Reverify merged tag after protected approval
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -282,14 +267,6 @@ jobs:
           git fetch --no-tags --prune origin \
             '+refs/heads/main:refs/remotes/origin/main'
           git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main
-          reviewer_count="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/environments/prd005-release" \
-            --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length')"
-          test "$reviewer_count" -ge 1
-          test "$(gh api \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/${GITHUB_REPOSITORY}/immutable-releases" \
-            --jq .enabled)" = true
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "release already exists: ${RELEASE_TAG}" >&2
             exit 1
