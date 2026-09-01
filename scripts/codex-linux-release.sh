@@ -133,7 +133,7 @@ check_candidate_delta() {
 
 check_locks() {
   cd "$REPO_ROOT"
-  [[ "$CODEX_RELEASE_VERSION" == "1.1.0-codex.2" ]] || die "unexpected release version"
+  [[ "$CODEX_RELEASE_VERSION" == "1.1.0-codex.3" ]] || die "unexpected release version"
   [[ "$CODEX_RELEASE_TAG" == "v${CODEX_RELEASE_VERSION}" ]] || die "release tag/version mismatch"
   [[ "$CODEX_ARTIFACT_NAME" == "agentcookie_${CODEX_RELEASE_VERSION}_linux_amd64" ]] || die "artifact name mismatch"
   [[ "$CODEX_SBOM_NAME" == "${CODEX_ARTIFACT_NAME}.cdx.json" ]] || die "SBOM asset name mismatch"

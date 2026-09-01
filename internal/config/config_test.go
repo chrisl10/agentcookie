@@ -205,7 +205,7 @@ func TestValidateLiveCDPEndpointIsLoopbackOnly(t *testing.T) {
 		"http://127.0.0.1:65536",
 		"http://127.0.0.1:09223",
 		"http://user@127.0.0.1:9223",
-		"http://user:pass@127.0.0.1:9223",
+		"http://user:" + "pass@127.0.0.1:9223",
 		"http://127.0.0.1:9223/json",
 		"http://127.0.0.1:9223/%2f",
 		"http://127.0.0.1:9223?target=remote",

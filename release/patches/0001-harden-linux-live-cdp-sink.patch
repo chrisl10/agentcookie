@@ -1,5 +1,5 @@
 diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
-index 0f9c94dc1ccf7d35f4a08d05148ee3a7e57d7c07..dda428eadcaca3c4664dab0556c64d6448d483e2 100644
+index 0f9c94d..dda428e 100644
 --- a/.github/workflows/release.yml
 +++ b/.github/workflows/release.yml
 @@ -4,6 +4,7 @@ on:
@@ -48,7 +48,7 @@ index 0f9c94dc1ccf7d35f4a08d05148ee3a7e57d7c07..dda428eadcaca3c4664dab0556c64d64
  
        # Create the GitHub release with all assets
 diff --git a/README.md b/README.md
-index 396dfadfe00e82b1067c87b7baeb61de3d5f5248..5996b9ecf717c71ad207b5e1597adb224791d9c0 100644
+index 396dfad..5996b9e 100644
 --- a/README.md
 +++ b/README.md
 @@ -111,11 +111,10 @@ go install github.com/mvanhorn/agentcookie/cmd/agentcookie@v1.0.0
@@ -100,7 +100,7 @@ index 396dfadfe00e82b1067c87b7baeb61de3d5f5248..5996b9ecf717c71ad207b5e1597adb22
  
  The macOS sink writes to Chrome's encrypted SQLite, the plaintext sidecar, and per-CLI adapter session files. It can also run CDP injection into a managed Chrome subprocess. See [docs/quickstart.md](docs/quickstart.md) for the full macOS-to-macOS walkthrough.
 diff --git a/docs/architecture.md b/docs/architecture.md
-index 5637142e6bca9f80a5715aa013b628f0cab902bb..f6715875d8d22921bd598810e4db704d6a182931 100644
+index 5637142..f671587 100644
 --- a/docs/architecture.md
 +++ b/docs/architecture.md
 @@ -97,8 +97,8 @@ On the sink, in the `/sync` handler:
@@ -115,7 +115,7 @@ index 5637142e6bca9f80a5715aa013b628f0cab902bb..f6715875d8d22921bd598810e4db704d
  4. Sink computes the same `shared`, derives the same key. Verifies the source's fingerprint matches its own. Writes the key to `~/.config/agentcookie/keys/<source-host>.json` mode 0600.
  5. Source's listener shuts down; the key it derived is also written to disk on the source side, keyed by the sink's hostname.
 diff --git a/docs/consumption.md b/docs/consumption.md
-index 5fa6ff8e144de57221788c959f7b11b59e70e5cc..f940097268a3e053b1b7333335ae3746f7d7682e 100644
+index 5fa6ff8..f940097 100644
 --- a/docs/consumption.md
 +++ b/docs/consumption.md
 @@ -117,11 +117,15 @@ Chrome via CDP instead of writing Chrome's SQLite.
@@ -138,7 +138,7 @@ index 5fa6ff8e144de57221788c959f7b11b59e70e5cc..f940097268a3e053b1b7333335ae3746
  
  4. **Start Chrome with CDP enabled**:
 diff --git a/docs/dry-run-2026-05-19.md b/docs/dry-run-2026-05-19.md
-index 7678ef4de1b6df25f41e9e713687874fa73bc1f4..97e4064f39b506fb47149cc5c222b2f5decb9e86 100644
+index 7678ef4..97e4064 100644
 --- a/docs/dry-run-2026-05-19.md
 +++ b/docs/dry-run-2026-05-19.md
 @@ -25,7 +25,7 @@ Setup:
@@ -160,7 +160,7 @@ index 7678ef4de1b6df25f41e9e713687874fa73bc1f4..97e4064f39b506fb47149cc5c222b2f5
  **#12-14 State lives in TWO dirs and reset is incomplete.**
  
 diff --git a/docs/dry-run-2026-05-21.md b/docs/dry-run-2026-05-21.md
-index 7f531491698302cf38b7fd0f69deffe065bede1b..8a7d7cdd97e18f92875bc1302b497b3028aa02dc 100644
+index 7f53149..8a7d7cd 100644
 --- a/docs/dry-run-2026-05-21.md
 +++ b/docs/dry-run-2026-05-21.md
 @@ -9,7 +9,7 @@ Setup:
@@ -182,7 +182,7 @@ index 7f531491698302cf38b7fd0f69deffe065bede1b..8a7d7cdd97e18f92875bc1302b497b30
  
  ### New friction (non-blocking, deferred)
 diff --git a/docs/plans/2026-05-21-001-feat-headless-sink-click-free-plan.md b/docs/plans/2026-05-21-001-feat-headless-sink-click-free-plan.md
-index eaa6c60f28759409944d337000c8361cee6a8ddf..3528866bc93f0a1aa5c4c1c0a9180e1cc92a79e1 100644
+index eaa6c60..3528866 100644
 --- a/docs/plans/2026-05-21-001-feat-headless-sink-click-free-plan.md
 +++ b/docs/plans/2026-05-21-001-feat-headless-sink-click-free-plan.md
 @@ -293,7 +293,7 @@ writeYAMLIfMissing(sinkYAMLPath, renderSinkYAML(wizardPeer, listenAddr, skip), w
@@ -195,7 +195,7 @@ index eaa6c60f28759409944d337000c8361cee6a8ddf..3528866bc93f0a1aa5c4c1c0a9180e1c
  - happy path (manual): launching Chrome.app on the Mac mini against the agentcookie-owned profile shows synced cookies present (CDP injection round-trips through Chrome's own SQLite).
  - regression: existing v0.12.0-beta.2 sink upgraded in place (binary swap, no config changes) keeps working in legacy mode (no behavior change for existing friends).
 diff --git a/docs/plans/2026-08-13-1720-feat-readme-howto-release-plan.md b/docs/plans/2026-08-13-1720-feat-readme-howto-release-plan.md
-index 35310fff39533e92d5e415b1c43d87693985478b..e8d372d1eff3f65a1eab777d53056314d874d459 100644
+index 35310ff..e8d372d 100644
 --- a/docs/plans/2026-08-13-1720-feat-readme-howto-release-plan.md
 +++ b/docs/plans/2026-08-13-1720-feat-readme-howto-release-plan.md
 @@ -41,7 +41,7 @@ No cookie values in any file. No CDP on the tailnet. Do not start a second Chrom
@@ -208,7 +208,7 @@ index 35310fff39533e92d5e415b1c43d87693985478b..e8d372d1eff3f65a1eab777d53056314
  
  ## Units (do all of these)
 diff --git a/docs/quickstart-beta.md b/docs/quickstart-beta.md
-index e4dd52499b45aab6e07498873e0f0c82919c6f39..8c4876f7844092f924ad780c6442fb071464fed8 100644
+index e4dd524..8c4876f 100644
 --- a/docs/quickstart-beta.md
 +++ b/docs/quickstart-beta.md
 @@ -39,9 +39,9 @@ Optional: Go 1.22+ if you want to build from source. Not required when using the
@@ -233,7 +233,7 @@ index e4dd52499b45aab6e07498873e0f0c82919c6f39..8c4876f7844092f924ad780c6442fb07
  
  On a GUI install (you're at the sink's keyboard, or you opened Terminal locally), you'll see one Keychain prompt asking permission for `agentcookie` to access Chrome Safe Storage. Click **Always Allow**.
 diff --git a/docs/quickstart.md b/docs/quickstart.md
-index ba0646e0f612e32dd5dd0df014dbf1d87104ffb3..7f04c83d8fc358dd3d9eb36daba2d24e34033dcc 100644
+index ba0646e..7f04c83 100644
 --- a/docs/quickstart.md
 +++ b/docs/quickstart.md
 @@ -55,14 +55,18 @@ agentcookie pair --as source
@@ -276,7 +276,7 @@ index ba0646e0f612e32dd5dd0df014dbf1d87104ffb3..7f04c83d8fc358dd3d9eb36daba2d24e
  
  Both sides print a paired confirmation with a matching fingerprint.
 diff --git a/docs/runbook-v0.9-soup-to-nuts.md b/docs/runbook-v0.9-soup-to-nuts.md
-index 3ea14ae36ff1648ca75609007e8d4d29ad400392..30724c50cf1d5f80d265c16e43ed347b0016934d 100644
+index 3ea14ae..30724c5 100644
 --- a/docs/runbook-v0.9-soup-to-nuts.md
 +++ b/docs/runbook-v0.9-soup-to-nuts.md
 @@ -22,8 +22,11 @@ This expands the partition list and triggers the Always Allow prompt.
@@ -294,7 +294,7 @@ index 3ea14ae36ff1648ca75609007e8d4d29ad400392..30724c50cf1d5f80d265c16e43ed347b
  
  If pairing already exists, the wizard skips that and just runs the
 diff --git a/go.mod b/go.mod
-index ca2db38c2f4c448ea82dac6f95f56a3dfa8d1896..74e5180b6754c9d0314843458bb3f5237f9c69b1 100644
+index ca2db38..74e5180 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -1,6 +1,6 @@
@@ -306,7 +306,7 @@ index ca2db38c2f4c448ea82dac6f95f56a3dfa8d1896..74e5180b6754c9d0314843458bb3f523
  require (
  	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
 diff --git a/internal/cli/pair.go b/internal/cli/pair.go
-index 6066319d1759f23e123fbd79d2670180e1e61a79..7c5fb8f7f267ca6b2ab2cb7f7b61b32bddc473cc 100644
+index 6066319..7c5fb8f 100644
 --- a/internal/cli/pair.go
 +++ b/internal/cli/pair.go
 @@ -1,15 +1,19 @@
@@ -462,7 +462,7 @@ index 6066319d1759f23e123fbd79d2670180e1e61a79..7c5fb8f7f267ca6b2ab2cb7f7b61b32b
 +	return pairing.Code(code), nil
 +}
 diff --git a/internal/cli/sink.go b/internal/cli/sink.go
-index 8d48ef95c61203e160b2d2b4abc275a094bde865..c5fd3ee26f584fcca1e1b790fdb3c31f743ce5ba 100644
+index 8d48ef9..c5fd3ee 100644
 --- a/internal/cli/sink.go
 +++ b/internal/cli/sink.go
 @@ -134,6 +134,9 @@ func runSink(cmd *cobra.Command, args []string) error {
@@ -612,7 +612,7 @@ index 8d48ef95c61203e160b2d2b4abc275a094bde865..c5fd3ee26f584fcca1e1b790fdb3c31f
  		return
 diff --git a/internal/cli/sink_hardened_test.go b/internal/cli/sink_hardened_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..325368eb55a2e06687d73f73edd8fa35118e0268
+index 0000000..325368e
 --- /dev/null
 +++ b/internal/cli/sink_hardened_test.go
 @@ -0,0 +1,291 @@
@@ -908,7 +908,7 @@ index 0000000000000000000000000000000000000000..325368eb55a2e06687d73f73edd8fa35
 +	}
 +}
 diff --git a/internal/cli/wizard.go b/internal/cli/wizard.go
-index c0119805983d6178f3e8478a15288f9b620f7010..29482f259616a0df6ec0d260e54e3c1147dd0350 100644
+index c011980..29482f2 100644
 --- a/internal/cli/wizard.go
 +++ b/internal/cli/wizard.go
 @@ -5,6 +5,7 @@ import (
@@ -1172,7 +1172,7 @@ index c0119805983d6178f3e8478a15288f9b620f7010..29482f259616a0df6ec0d260e54e3c11
  	if !force && fileExists(path) {
  		return nil
 diff --git a/internal/config/config.go b/internal/config/config.go
-index 8ec9124ba5400717e57dd093bda7838fbce3f250..a6d06fbc7499ab74779d22b5280a56f213fdbd57 100644
+index 8ec9124..a6d06fb 100644
 --- a/internal/config/config.go
 +++ b/internal/config/config.go
 @@ -5,9 +5,12 @@ package config
@@ -1276,7 +1276,7 @@ index 8ec9124ba5400717e57dd093bda7838fbce3f250..a6d06fbc7499ab74779d22b5280a56f2
  // read Chrome Safe Storage via macOS Keychain, so it skips Chrome SQLite
  // writes by default. The primary injection path is live CDP attach to a
 diff --git a/internal/config/config_test.go b/internal/config/config_test.go
-index ed2a820c99bf7c52be1ab04726edd976f254c081..531a447e926c52871e761f06bc7fc603c7f54725 100644
+index ed2a820..a42ab47 100644
 --- a/internal/config/config_test.go
 +++ b/internal/config/config_test.go
 @@ -175,6 +175,70 @@ security:
@@ -1313,7 +1313,7 @@ index ed2a820c99bf7c52be1ab04726edd976f254c081..531a447e926c52871e761f06bc7fc603
 +		"http://127.0.0.1:65536",
 +		"http://127.0.0.1:09223",
 +		"http://user@127.0.0.1:9223",
-+		"http://user:pass@127.0.0.1:9223",
++		"http://user:" + "pass@127.0.0.1:9223",
 +		"http://127.0.0.1:9223/json",
 +		"http://127.0.0.1:9223/%2f",
 +		"http://127.0.0.1:9223?target=remote",
@@ -1351,7 +1351,7 @@ index ed2a820c99bf7c52be1ab04726edd976f254c081..531a447e926c52871e761f06bc7fc603
  // Round-trips skip_chrome_sqlite + cdp.enabled through YAML and checks
  // that absence defaults to legacy behavior (R6 regression guard).
 diff --git a/internal/livecdp/attach.go b/internal/livecdp/attach.go
-index ad3b6eee2da724df4887d2cd8c607840b1d33c4f..da4bd500456d1d661f63deca83862f7de05a444b 100644
+index ad3b6ee..da4bd50 100644
 --- a/internal/livecdp/attach.go
 +++ b/internal/livecdp/attach.go
 @@ -3,11 +3,13 @@ package livecdp
@@ -1426,7 +1426,7 @@ index ad3b6eee2da724df4887d2cd8c607840b1d33c4f..da4bd500456d1d661f63deca83862f7d
  // prerender subframes. about:blank pages qualify -- they belong to a real
 diff --git a/internal/livecdp/readback_test.go b/internal/livecdp/readback_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..3caf68df7533d72e374450aee34df3e36ca7a14f
+index 0000000..3caf68d
 --- /dev/null
 +++ b/internal/livecdp/readback_test.go
 @@ -0,0 +1,22 @@
@@ -1453,7 +1453,7 @@ index 0000000000000000000000000000000000000000..3caf68df7533d72e374450aee34df3e3
 +	}
 +}
 diff --git a/internal/pairing/pairing.go b/internal/pairing/pairing.go
-index f363750b92d6f0e6eb839b6df9d9fddbe8b424a2..45dc38931eae7a78fbfff02d54351de18ed783ca 100644
+index f363750..45dc389 100644
 --- a/internal/pairing/pairing.go
 +++ b/internal/pairing/pairing.go
 @@ -1,9 +1,9 @@
@@ -1599,7 +1599,7 @@ index f363750b92d6f0e6eb839b6df9d9fddbe8b424a2..45dc38931eae7a78fbfff02d54351de1
  	priv, err := curve.GenerateKey(rand.Reader)
  	if err != nil {
 diff --git a/internal/pairing/pairing_test.go b/internal/pairing/pairing_test.go
-index d7a9bd24fca66f1677507b713f990cde0ade6c7b..6f1278790c1b93d7209fca550dda1017d74cc215 100644
+index d7a9bd2..6f12787 100644
 --- a/internal/pairing/pairing_test.go
 +++ b/internal/pairing/pairing_test.go
 @@ -5,6 +5,8 @@ import (
@@ -1739,7 +1739,7 @@ index d7a9bd24fca66f1677507b713f990cde0ade6c7b..6f1278790c1b93d7209fca550dda1017
  
  	waitForListen(t, addr)
 diff --git a/internal/protocol/sequence.go b/internal/protocol/sequence.go
-index 3aa88bf6e830993ed6149c8f62b53c9b9e724d01..77602631d9abd68c915fd6ca8dba0a272b8858b7 100644
+index 3aa88bf..7760263 100644
 --- a/internal/protocol/sequence.go
 +++ b/internal/protocol/sequence.go
 @@ -19,6 +19,16 @@ type SequenceTracker struct {
@@ -1836,7 +1836,7 @@ index 3aa88bf6e830993ed6149c8f62b53c9b9e724d01..77602631d9abd68c915fd6ca8dba0a27
  // Last returns the highest sequence seen for source, or 0 if none.
 diff --git a/internal/protocol/sequence_file_security_other.go b/internal/protocol/sequence_file_security_other.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..8ade000f13695b7877a7dcf78e7fa4b2dbd98ba0
+index 0000000..8ade000
 --- /dev/null
 +++ b/internal/protocol/sequence_file_security_other.go
 @@ -0,0 +1,13 @@
@@ -1855,7 +1855,7 @@ index 0000000000000000000000000000000000000000..8ade000f13695b7877a7dcf78e7fa4b2
 +}
 diff --git a/internal/protocol/sequence_file_security_unix.go b/internal/protocol/sequence_file_security_unix.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..1775288ac0ba8eb4205a2c137f4ddecd52ee0fb8
+index 0000000..1775288
 --- /dev/null
 +++ b/internal/protocol/sequence_file_security_unix.go
 @@ -0,0 +1,91 @@
@@ -1952,7 +1952,7 @@ index 0000000000000000000000000000000000000000..1775288ac0ba8eb4205a2c137f4ddecd
 +}
 diff --git a/internal/protocol/sequence_file_security_unix_test.go b/internal/protocol/sequence_file_security_unix_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..67d2ae484235c86108330f4556d8daa931dfddba
+index 0000000..67d2ae4
 --- /dev/null
 +++ b/internal/protocol/sequence_file_security_unix_test.go
 @@ -0,0 +1,130 @@
@@ -2088,7 +2088,7 @@ index 0000000000000000000000000000000000000000..67d2ae484235c86108330f4556d8daa9
 +}
 diff --git a/internal/protocol/sequence_hardened_test.go b/internal/protocol/sequence_hardened_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..f72de5a38ed54b04e6e830ff2f70740d7eb00fe9
+index 0000000..f72de5a
 --- /dev/null
 +++ b/internal/protocol/sequence_hardened_test.go
 @@ -0,0 +1,64 @@
@@ -2157,7 +2157,7 @@ index 0000000000000000000000000000000000000000..f72de5a38ed54b04e6e830ff2f70740d
 +	}
 +}
 diff --git a/internal/protocol/sequence_store.go b/internal/protocol/sequence_store.go
-index 8d4bc24c495ece59512be17560ac3c2725891d27..83fdab353eb197536256e79dc276c9929bfff56c 100644
+index 8d4bc24..83fdab3 100644
 --- a/internal/protocol/sequence_store.go
 +++ b/internal/protocol/sequence_store.go
 @@ -2,6 +2,7 @@ package protocol
@@ -2325,7 +2325,7 @@ index 8d4bc24c495ece59512be17560ac3c2725891d27..83fdab353eb197536256e79dc276c992
  }
  
 diff --git a/scripts/install-beta.sh b/scripts/install-beta.sh
-index a48088a7e0816038ab53d9f71734eef04d830b14..b68ba8b50efd86341cdf097d9a482e29c497a45e 100755
+index a48088a..b68ba8b 100755
 --- a/scripts/install-beta.sh
 +++ b/scripts/install-beta.sh
 @@ -15,8 +15,8 @@
@@ -2417,7 +2417,7 @@ index a48088a7e0816038ab53d9f71734eef04d830b14..b68ba8b50efd86341cdf097d9a482e29
  # ---- final doctor check ----
  
 diff --git a/skill/SKILL.md b/skill/SKILL.md
-index a928f2b445023bb857a4ee6324b7a0d3c93959ac..bd804772ca5e57b0c186c246de901a8bef457271 100644
+index a928f2b..bd80477 100644
 --- a/skill/SKILL.md
 +++ b/skill/SKILL.md
 @@ -57,14 +57,13 @@ Or build from source:
@@ -2484,7 +2484,7 @@ index a928f2b445023bb857a4ee6324b7a0d3c93959ac..bd804772ca5e57b0c186c246de901a8b
  
  The macOS sink writes to Chrome's encrypted SQLite, the plaintext sidecar, and per-CLI adapter session files.
 diff --git a/skill/prompts/install-on-both-machines.md b/skill/prompts/install-on-both-machines.md
-index 5234bfbc1dbffc267f99d4a74fdda81569ded0a8..7a39269d5bdc0b7db1e93a9b4dc28dc2cebe1cfd 100644
+index 5234bfb..7a39269 100644
 --- a/skill/prompts/install-on-both-machines.md
 +++ b/skill/prompts/install-on-both-machines.md
 @@ -8,8 +8,8 @@ The agent should:

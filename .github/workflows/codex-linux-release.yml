@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - v1.1.0-codex.2
+      - v1.1.0-codex.3
 
 concurrency:
   group: codex-linux-release-${{ github.ref }}
@@ -16,11 +16,11 @@ permissions:
   contents: read
 
 env:
-  RELEASE_TAG: v1.1.0-codex.2
-  ARTIFACT_NAME: agentcookie_1.1.0-codex.2_linux_amd64
-  SBOM_NAME: agentcookie_1.1.0-codex.2_linux_amd64.cdx.json
-  PROVENANCE_BUNDLE_NAME: agentcookie_1.1.0-codex.2_linux_amd64.provenance.json
-  SBOM_ATTESTATION_BUNDLE_NAME: agentcookie_1.1.0-codex.2_linux_amd64.sbom-attestation.json
+  RELEASE_TAG: v1.1.0-codex.3
+  ARTIFACT_NAME: agentcookie_1.1.0-codex.3_linux_amd64
+  SBOM_NAME: agentcookie_1.1.0-codex.3_linux_amd64.cdx.json
+  PROVENANCE_BUNDLE_NAME: agentcookie_1.1.0-codex.3_linux_amd64.provenance.json
+  SBOM_ATTESTATION_BUNDLE_NAME: agentcookie_1.1.0-codex.3_linux_amd64.sbom-attestation.json
   SIGNER_WORKFLOW: chrisl10/agentcookie/.github/workflows/codex-linux-release.yml
   # actions/checkout writes safe.directory into a temporary HOME that is
   # removed before later container steps. Keep Git trust scoped to this exact
@@ -156,7 +156,7 @@ jobs:
   release-preflight:
     name: prove merged tag before release approval
     needs: promote
-    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.2'
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.3'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -187,7 +187,7 @@ jobs:
   attest:
     name: attest exact tag assets
     needs: [promote, release-preflight]
-    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.2'
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.3'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -207,8 +207,8 @@ jobs:
         uses: actions/attest@c32b4b8b198b65d0bd9d63490e847ff7b53989d4 # v4.0.0
         with:
           subject-path: |
-            dist/agentcookie_1.1.0-codex.2_linux_amd64
-            dist/agentcookie_1.1.0-codex.2_linux_amd64.cdx.json
+            dist/agentcookie_1.1.0-codex.3_linux_amd64
+            dist/agentcookie_1.1.0-codex.3_linux_amd64.cdx.json
             dist/LICENSE
             dist/BUILD-PROVENANCE.txt
 
@@ -216,8 +216,8 @@ jobs:
         id: sbom_attestation
         uses: actions/attest@c32b4b8b198b65d0bd9d63490e847ff7b53989d4 # v4.0.0
         with:
-          subject-path: dist/agentcookie_1.1.0-codex.2_linux_amd64
-          sbom-path: dist/agentcookie_1.1.0-codex.2_linux_amd64.cdx.json
+          subject-path: dist/agentcookie_1.1.0-codex.3_linux_amd64
+          sbom-path: dist/agentcookie_1.1.0-codex.3_linux_amd64.cdx.json
 
       - name: Stage canonical offline attestation bundles
         run: |
@@ -241,7 +241,7 @@ jobs:
   publish:
     name: publish approved immutable release
     needs: attest
-    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.2'
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.3'
     environment: prd005-release
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -328,7 +328,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "AgentCookie ${RELEASE_TAG} — ReachLynk hardened Linux sink" \
-            --notes "Reviewed Linux amd64 sink derived from upstream 97dd731250b0d9a340f2d0fa776346d807335d60 with security-remediated locked patch a60f15c6c87195ae949774117762e8f78ae63df8a3e79d99be7fa7de6dc931ff."
+            --notes "Reviewed Linux amd64 sink derived from upstream 97dd731250b0d9a340f2d0fa776346d807335d60 with security-remediated locked patch 0ffe4ca1888da2d05639d09e0dcb4f230090310eeddf50bd66cd43e1d70699a8."
 
       - name: Verify published immutable release
         env:
