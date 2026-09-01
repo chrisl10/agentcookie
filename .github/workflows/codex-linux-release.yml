@@ -114,22 +114,22 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: codex-linux-build-a
-          path: build-a
+          path: /tmp/agentcookie-build-a
 
       - name: Download build B
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: codex-linux-build-b
-          path: build-b
+          path: /tmp/agentcookie-build-b
 
       - name: Require byte-identical builds
         run: |
-          cmp "build-a/${ARTIFACT_NAME}" "build-b/${ARTIFACT_NAME}"
-          sha256sum "build-a/${ARTIFACT_NAME}" "build-b/${ARTIFACT_NAME}"
+          cmp "/tmp/agentcookie-build-a/${ARTIFACT_NAME}" "/tmp/agentcookie-build-b/${ARTIFACT_NAME}"
+          sha256sum "/tmp/agentcookie-build-a/${ARTIFACT_NAME}" "/tmp/agentcookie-build-b/${ARTIFACT_NAME}"
 
       - name: Assemble release assets
         run: |
-          install -D -m 0755 "build-a/${ARTIFACT_NAME}" "dist/${ARTIFACT_NAME}"
+          install -D -m 0755 "/tmp/agentcookie-build-a/${ARTIFACT_NAME}" "dist/${ARTIFACT_NAME}"
           install -m 0644 LICENSE dist/LICENSE
           ./scripts/codex-linux-release.sh sbom \
             "dist/${ARTIFACT_NAME}" "dist/${SBOM_NAME}"
@@ -351,7 +351,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "AgentCookie ${RELEASE_TAG} — ReachLynk hardened Linux sink" \
-            --notes "Reviewed Linux amd64 sink derived from upstream 97dd731250b0d9a340f2d0fa776346d807335d60 with security-remediated locked patch 66d4754f1019c2f4d94b62195035923696bd4cbb51feb91d734562cf5a5c2641."
+            --notes "Reviewed Linux amd64 sink derived from upstream 97dd731250b0d9a340f2d0fa776346d807335d60 with security-remediated locked patch a60f15c6c87195ae949774117762e8f78ae63df8a3e79d99be7fa7de6dc931ff."
 
       - name: Verify published immutable release
         env:

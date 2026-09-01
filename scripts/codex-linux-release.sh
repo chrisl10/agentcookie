@@ -183,6 +183,21 @@ check_locks() {
     || die "workflow build containers are not locked to the non-root release user"
   [[ "$(grep -Fxc '      GOCACHE: /tmp/agentcookie-go-build' "$WORKFLOW_FILE")" -eq 3 ]] \
     || die "workflow build caches are not scoped to the writable ephemeral path"
+  grep -Fq '          path: /tmp/agentcookie-build-a' "$WORKFLOW_FILE" \
+    || die "promoted build A is not isolated outside the source checkout"
+  grep -Fq '          path: /tmp/agentcookie-build-b' "$WORKFLOW_FILE" \
+    || die "promoted build B is not isolated outside the source checkout"
+  # shellcheck disable=SC2016 # Match literal workflow environment expansion.
+  grep -Fq '          cmp "/tmp/agentcookie-build-a/${ARTIFACT_NAME}" "/tmp/agentcookie-build-b/${ARTIFACT_NAME}"' "$WORKFLOW_FILE" \
+    || die "promotion does not compare the two isolated build artifacts"
+  # shellcheck disable=SC2016 # Match literal workflow environment expansion.
+  grep -Fq '          sha256sum "/tmp/agentcookie-build-a/${ARTIFACT_NAME}" "/tmp/agentcookie-build-b/${ARTIFACT_NAME}"' "$WORKFLOW_FILE" \
+    || die "promotion does not hash the two isolated build artifacts"
+  # shellcheck disable=SC2016 # Match literal workflow environment expansion.
+  grep -Fq '          install -D -m 0755 "/tmp/agentcookie-build-a/${ARTIFACT_NAME}" "dist/${ARTIFACT_NAME}"' "$WORKFLOW_FILE" \
+    || die "promotion does not install the compared build A artifact"
+  grep -Fq "security-remediated locked patch ${CODEX_PATCH_SHA256}." "$WORKFLOW_FILE" \
+    || die "public release notes do not identify the locked patch"
   ! grep -Eq 'uses:[[:space:]]+[^[:space:]]+@(main|master|v[0-9]+)$' "$WORKFLOW_FILE" \
     || die "workflow contains a floating action reference"
   grep -Fq "refs/tags/${CODEX_RELEASE_TAG}" "$WORKFLOW_FILE" \
