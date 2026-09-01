@@ -133,7 +133,7 @@ check_candidate_delta() {
 
 check_locks() {
   cd "$REPO_ROOT"
-  [[ "$CODEX_RELEASE_VERSION" == "1.1.0-codex.1" ]] || die "unexpected release version"
+  [[ "$CODEX_RELEASE_VERSION" == "1.1.0-codex.2" ]] || die "unexpected release version"
   [[ "$CODEX_RELEASE_TAG" == "v${CODEX_RELEASE_VERSION}" ]] || die "release tag/version mismatch"
   [[ "$CODEX_ARTIFACT_NAME" == "agentcookie_${CODEX_RELEASE_VERSION}_linux_amd64" ]] || die "artifact name mismatch"
   [[ "$CODEX_SBOM_NAME" == "${CODEX_ARTIFACT_NAME}.cdx.json" ]] || die "SBOM asset name mismatch"
@@ -207,17 +207,19 @@ check_locks() {
   # shellcheck disable=SC2016 # Match the literal Actions expression syntax.
   ! grep -Fq 'if: ${{ secrets.' .github/workflows/release.yml \
     || die "upstream release workflow contains invalid direct secret conditions"
-  grep -Fq 'environment: prd005-release' "$WORKFLOW_FILE" \
+  [[ "$(grep -Fxc '    environment: prd005-release' "$WORKFLOW_FILE")" -eq 1 ]] \
     || die "workflow protected release environment is absent"
   # shellcheck disable=SC2016 # Verify the literal Actions runtime expression.
   grep -Fq 'git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main' "$WORKFLOW_FILE" \
     || die "workflow does not prove the release commit is merged into origin/main"
-  grep -Fq 'environments/prd005-release' "$WORKFLOW_FILE" \
-    || die "workflow does not inspect the runtime release environment"
-  grep -Fq 'required_reviewers' "$WORKFLOW_FILE" \
-    || die "workflow does not require runtime reviewer protection"
-  [[ "$(grep -Fxc '      actions: read' "$WORKFLOW_FILE")" -eq 2 ]] \
-    || die "environment API jobs do not have the exact actions: read permission"
+  ! grep -Fq 'environments/prd005-release' "$WORKFLOW_FILE" \
+    || die "workflow attempts a repository-admin environment API read"
+  ! grep -Fq 'required_reviewers' "$WORKFLOW_FILE" \
+    || die "workflow attempts to infer protected-environment admission"
+  [[ "$(grep -Fxc '      actions: read' "$WORKFLOW_FILE")" -eq 1 ]] \
+    || die "publisher does not have the exact artifact-read permission"
+  grep -Fq -- '--json isImmutable --jq .isImmutable' "$WORKFLOW_FILE" \
+    || die "publisher does not prove the created release is immutable"
   [[ "$(grep -Fc 'outputs.bundle-path' "$WORKFLOW_FILE")" -eq 2 ]] \
     || die "workflow does not retain both offline attestation bundles"
   # shellcheck disable=SC2016 # Verify the literal Actions shell expansion.
