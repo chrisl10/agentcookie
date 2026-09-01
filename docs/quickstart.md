@@ -55,14 +55,18 @@ agentcookie pair --as source
 You'll see:
 
 ```
+agentcookie one-time pairing code: <shown only on the controlling terminal>
 agentcookie pair (source side)
-  pairing code: YILU-OIVK
+  pairing code: delivered directly to the controlling terminal
   source hostname: my-laptop.tailnet.ts.net
-  listening on: 0.0.0.0:9998
+  listening on: 100.98.176.68:9998
 
   Run this on the sink machine within 10m0s
-    agentcookie pair --as sink --peer my-laptop.tailnet.ts.net \
-      --pair-url http://0.0.0.0:9998/pair --code YILU-OIVK
+    read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
+    printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \
+      --peer my-laptop.tailnet.ts.net \
+      --pair-url http://100.98.176.68:9998/pair --code-stdin
+    unset AGENTCOOKIE_PAIR_CODE
 
   Waiting for sink...
 ```
@@ -70,9 +74,12 @@ agentcookie pair (source side)
 On the sink:
 
 ```
-agentcookie pair --as sink --peer my-laptop.tailnet.ts.net \
-  --pair-url http://my-laptop.tailnet.ts.net:9998/pair \
-  --code YILU-OIVK
+read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
+printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \
+  --peer my-laptop.tailnet.ts.net \
+  --pair-url http://100.98.176.68:9998/pair \
+  --code-stdin
+unset AGENTCOOKIE_PAIR_CODE
 ```
 
 Both sides print a paired confirmation with a matching fingerprint.

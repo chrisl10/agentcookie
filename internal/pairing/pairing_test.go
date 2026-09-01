@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -100,9 +102,113 @@ func TestRunSourceTimesOut(t *testing.T) {
 	addr := freeAddr(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	_, _, err := RunSource(ctx, addr, "laptop.test", io.Discard)
+	_, err := RunSource(ctx, addr, "laptop.test", io.Discard, io.Discard)
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
+	}
+}
+
+func TestRunSourcePrintsStdinOnlyPairingCommand(t *testing.T) {
+	addr := freeAddr(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	var output bytes.Buffer
+	var secretOutput bytes.Buffer
+	_, _ = RunSource(ctx, addr, "laptop.test", &output, &secretOutput)
+	text := output.String()
+	if strings.Contains(text, " --code ") {
+		t.Fatalf("pairing output put the one-time code in argv: %s", text)
+	}
+	if !strings.Contains(text, "--code-stdin") || !strings.Contains(text, "read -rsp") {
+		t.Fatalf("pairing output omitted the stdin-only command: %s", text)
+	}
+	secretFields := strings.Fields(secretOutput.String())
+	if len(secretFields) == 0 {
+		t.Fatal("owner-attended secret writer did not receive the pairing code")
+	}
+	code := secretFields[len(secretFields)-1]
+	if strings.Contains(text, code) {
+		t.Fatal("status output leaked the one-time code")
+	}
+}
+
+func TestRunSourceSentinelAppearsOnlyOnOwnerSecretWriter(t *testing.T) {
+	const sentinel = "SENT-INEL-CODE"
+	addr := freeAddr(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var statusOutput bytes.Buffer
+	var secretOutput bytes.Buffer
+	type sourceResult struct {
+		result *HandshakeResult
+		err    error
+	}
+	resultCh := make(chan sourceResult, 1)
+	go func() {
+		result, err := runSourceWithCode(ctx, addr, "laptop.test", Code(sentinel), &statusOutput, &secretOutput)
+		resultCh <- sourceResult{result: result, err: err}
+	}()
+	waitForListen(t, addr)
+
+	sinkResult, err := RunSink(ctx, "http://"+addr+"/pair", Code(sentinel), "sink.test")
+	if err != nil {
+		t.Fatalf("sink pairing: %v", err)
+	}
+	source := <-resultCh
+	if source.err != nil {
+		t.Fatalf("source pairing: %v", source.err)
+	}
+	if !strings.Contains(secretOutput.String(), sentinel) {
+		t.Fatal("sentinel was not delivered to the owner-attended secret writer")
+	}
+	for label, candidate := range map[string]string{
+		"status":        statusOutput.String(),
+		"source result": fmt.Sprintf("%+v", source.result),
+		"sink result":   fmt.Sprintf("%+v", sinkResult),
+	} {
+		if strings.Contains(candidate, sentinel) {
+			t.Fatalf("%s leaked sentinel pairing code", label)
+		}
+	}
+}
+
+type secretWriterFunc func([]byte) (int, error)
+
+func (write secretWriterFunc) Write(data []byte) (int, error) {
+	return write(data)
+}
+
+func TestRunSourceSecretWriteFailureClosesListenerWithoutLeak(t *testing.T) {
+	const sentinel = "SENT-INEL-CODE"
+	tests := map[string]io.Writer{
+		"error": secretWriterFunc(func([]byte) (int, error) {
+			return 0, errors.New("injected terminal write failure")
+		}),
+		"short write": secretWriterFunc(func(data []byte) (int, error) {
+			return len(data) - 1, nil
+		}),
+	}
+	for name, secretWriter := range tests {
+		t.Run(name, func(t *testing.T) {
+			addr := freeAddr(t)
+			var statusOutput bytes.Buffer
+			result, err := runSourceWithCode(context.Background(), addr, "source.test", Code(sentinel), &statusOutput, secretWriter)
+			if err == nil || result != nil {
+				t.Fatalf("secret write failure did not fail closed: result=%v err=%v", result != nil, err)
+			}
+			if strings.Contains(err.Error(), sentinel) || strings.Contains(statusOutput.String(), sentinel) {
+				t.Fatal("secret write failure leaked the pairing code")
+			}
+			if statusOutput.Len() != 0 {
+				t.Fatal("status output was emitted after secret delivery failed")
+			}
+			conn, dialErr := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+			if dialErr == nil {
+				conn.Close()
+				t.Fatal("pair listener remained reachable after secret delivery failed")
+			}
+		})
 	}
 }
 
@@ -118,7 +224,7 @@ func TestRunSourceRejectsBadCode(t *testing.T) {
 		// Source-side error not checked: we cancel the ctx below, which
 		// returns context.Canceled. The signal we care about is that the
 		// sink call returns the right rejection.
-		_, _, _ = RunSource(ctx, addr, "laptop.test", io.Discard)
+		_, _ = RunSource(ctx, addr, "laptop.test", io.Discard, io.Discard)
 	})
 
 	waitForListen(t, addr)

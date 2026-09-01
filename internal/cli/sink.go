@@ -134,6 +134,9 @@ func runSink(cmd *cobra.Command, args []string) error {
 	// window). Operator recovery: delete ~/.agentcookie/sequence.json.
 	home, _ := os.UserHomeDir()
 	seqStore := protocol.NewFileSequenceStore(protocol.DefaultSequencePath(home))
+	if cfg.HardenedLiveCDP {
+		seqStore = protocol.NewRequiredFileSequenceStore(cfg.ReplayStatePath)
+	}
 	seqTracker, err := protocol.NewTrackerFromStore(seqStore)
 	if err != nil {
 		return fmt.Errorf("load replay-defense state: %w", err)
@@ -234,11 +237,6 @@ func newSinkMux(
 		}
 		blockMatcher := protocol.NewBlocklistMatcherForSink(bl)
 
-		if !seqTracker.Accept(envelope.SourceHostname, envelope.Sequence) {
-			http.Error(w, fmt.Sprintf("sequence %d not greater than last seen for %q (replay defense)", envelope.Sequence, envelope.SourceHostname), http.StatusConflict)
-			return
-		}
-
 		// Sink-side cookie policy filter (defense in depth).
 		cookies := envelope.Cookies
 		var droppedHosts map[string]int
@@ -247,6 +245,16 @@ func newSinkMux(
 		dropped := 0
 		for _, n := range droppedHosts {
 			dropped += n
+		}
+
+		if cfg.HardenedLiveCDP {
+			handleHardenedLiveCDPSync(w, r, cfg, &envelope, cookies, dropped, blockMatcher, seqTracker, stateWriter, sinkState, stateMu)
+			return
+		}
+
+		if !seqTracker.Accept(envelope.SourceHostname, envelope.Sequence) {
+			http.Error(w, "replay rejected", http.StatusConflict)
+			return
 		}
 
 		if sinkDryRun {
@@ -444,6 +452,105 @@ func newSinkMux(
 		_, _ = fmt.Fprintln(w, okLine)
 	})
 	return mux
+}
+
+// liveCDPInject is an indirection seam for hardened handler tests.
+var liveCDPInject = livecdp.AttachAndInject
+
+// handleHardenedLiveCDPSync is deliberately a separate, short path. It never
+// invokes the sidecar, Chrome SQLite, storage archive, secrets bus, cmux, or
+// per-CLI adapter implementations. Its only permitted side effects, in order,
+// are live CDP injection, durable replay commit, truthful status, and ACK.
+func handleHardenedLiveCDPSync(
+	w http.ResponseWriter,
+	r *http.Request,
+	cfg *config.SinkConfig,
+	envelope *protocol.SyncEnvelope,
+	cookies []chrome.Cookie,
+	dropped int,
+	blockMatcher *protocol.BlocklistMatcher,
+	seqTracker *protocol.SequenceTracker,
+	stateWriter *state.Writer,
+	sinkState *state.SinkState,
+	stateMu *sync.Mutex,
+) {
+	if len(envelope.LocalStorageTarball) > 0 || len(envelope.IndexedDBTarball) > 0 || len(envelope.IndexedDBSkipped) > 0 || len(envelope.Secrets) > 0 {
+		err := fmt.Errorf("forbidden non-cookie payload")
+		// Reject prohibited payloads before status, filesystem, replay, CDP,
+		// or acknowledgement effects. The HTTP response is the only effect.
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	if len(cookies) == 0 {
+		err := fmt.Errorf("no allowlisted cookies to inject")
+		recordSinkReject(sinkState, stateWriter, stateMu, err)
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	reservation, ok := seqTracker.Reserve(envelope.SourceHostname, envelope.Sequence)
+	if !ok {
+		http.Error(w, "replay rejected", http.StatusConflict)
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			reservation.Abort()
+		}
+	}()
+
+	endpoint := cfg.LiveCDP.Endpoint
+	if endpoint == "" {
+		endpoint = livecdp.DefaultCDPEndpoint
+	}
+	contexts, injectErr := liveCDPInject(r.Context(), endpoint, cookies)
+	if injectErr != nil || contexts == 0 {
+		// Never echo the CDP error: browser implementations may include cookie
+		// names or hosts in parameter-validation errors.
+		err := fmt.Errorf("live CDP injection failed")
+		recordSinkReject(sinkState, stateWriter, stateMu, err)
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if err := reservation.Commit(); err != nil {
+		committed = true // Commit releases the reservation even on save failure.
+		safeErr := fmt.Errorf("durable replay commit failed")
+		recordSinkReject(sinkState, stateWriter, stateMu, safeErr)
+		http.Error(w, safeErr.Error(), http.StatusInsufficientStorage)
+		return
+	}
+	committed = true
+
+	stateMu.Lock()
+	now := time.Now().UTC()
+	sinkState.LastWrite = now
+	sinkState.LastWriteCount = len(cookies)
+	sinkState.LastWriteMode = "livecdp-hardened"
+	sinkState.LastError = ""
+	sinkState.TotalWrites++
+	sinkState.TotalDropped += dropped
+	if sinkState.LiveCDP == nil {
+		sinkState.LiveCDP = &state.LiveCDPState{Enabled: true, Endpoint: endpoint}
+	}
+	sinkState.LiveCDP.LastInjectAt = now
+	sinkState.LiveCDP.LastCookies = len(cookies)
+	sinkState.LiveCDP.LastContexts = contexts
+	sinkState.LiveCDP.LastError = ""
+	sinkState.LiveCDP.TotalInjects++
+	if err := stateWriter.Save(sinkState); err != nil {
+		// Replay is already durable, so never ACK a success that could not be
+		// recorded truthfully. The duplicate retry will fail closed and require
+		// operator reconciliation from the durable replay high-water mark.
+		sinkState.LastWriteMode = ""
+		sinkState.LastError = "truthful status persist failed"
+		sinkState.LiveCDP.LastError = "truthful status persist failed"
+		stateMu.Unlock()
+		http.Error(w, "truthful status persist failed", http.StatusInsufficientStorage)
+		return
+	}
+	stateMu.Unlock()
+
+	_, _ = fmt.Fprintf(w, "ok: injected %d cookies into %d context(s); dropped %d %s cookies\n", len(cookies), contexts, dropped, blockMatcher.DropLabel())
 }
 
 func recordSinkReject(sinkState *state.SinkState, stateWriter *state.Writer, stateMu *sync.Mutex, err error) {

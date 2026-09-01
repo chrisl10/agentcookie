@@ -5,9 +5,12 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -59,6 +62,10 @@ type SinkConfig struct {
 	LiveCDP          LiveCDPRef  `yaml:"live_cdp,omitempty" json:"live_cdp,omitempty"`
 	Cmux             CmuxRef     `yaml:"cmux,omitempty" json:"cmux,omitempty"`
 	Delivery         string      `yaml:"delivery,omitempty" json:"delivery,omitempty"`
+	// HardenedLiveCDP turns the Linux sink into a cookie-only endpoint.
+	// Every disk, adapter, and secrets delivery surface is prohibited.
+	HardenedLiveCDP bool   `yaml:"hardened_live_cdp,omitempty" json:"hardened_live_cdp,omitempty"`
+	ReplayStatePath string `yaml:"replay_state_path,omitempty" json:"replay_state_path,omitempty"`
 }
 
 // CmuxRef configures the cmux cookie-delivery surface (a fourth surface
@@ -263,7 +270,73 @@ func LoadSink(dir string) (*SinkConfig, error) {
 	if IsLinux() {
 		applyLinuxSinkDefaults(&cfg)
 	}
+	if cfg.LiveCDP.Enabled {
+		if err := validateLiveCDPEndpoint(cfg.LiveCDP.Endpoint); err != nil {
+			return nil, fmt.Errorf("%s: live_cdp.endpoint: %w", path, err)
+		}
+	}
+	if cfg.HardenedLiveCDP {
+		if !IsLinux() {
+			return nil, fmt.Errorf("%s: hardened_live_cdp is Linux-only", path)
+		}
+		if !cfg.SkipChromeSQLite || !cfg.LiveCDP.Enabled || cfg.CDP.Enabled || cfg.Cmux.Enabled {
+			return nil, fmt.Errorf("%s: hardened_live_cdp requires skip_chrome_sqlite=true and live_cdp.enabled=true, with cdp and cmux disabled", path)
+		}
+		if cfg.ReplayStatePath == "" || !filepath.IsAbs(cfg.ReplayStatePath) {
+			return nil, fmt.Errorf("%s: hardened_live_cdp requires an absolute replay_state_path", path)
+		}
+		cfg.ReplayStatePath = filepath.Clean(cfg.ReplayStatePath)
+	}
 	return &cfg, nil
+}
+
+// validateLiveCDPEndpoint constrains CDP attachment to an explicit local TCP
+// endpoint. An empty value selects the built-in http://127.0.0.1:9223 default;
+// every configured value must be a canonical loopback-only HTTP origin.
+func validateLiveCDPEndpoint(endpoint string) error {
+	if endpoint == "" {
+		return nil
+	}
+	if strings.ContainsAny(endpoint, "?#") {
+		return fmt.Errorf("query strings and fragments are prohibited")
+	}
+	if !strings.HasPrefix(endpoint, "http://") {
+		return fmt.Errorf("scheme must be exactly http")
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("parse endpoint: %w", err)
+	}
+	if u.Scheme != "http" || u.Opaque != "" {
+		return fmt.Errorf("scheme must be exactly http")
+	}
+	if u.User != nil {
+		return fmt.Errorf("userinfo is prohibited")
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return fmt.Errorf("query strings and fragments are prohibited")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("path must be empty or /")
+	}
+	if u.RawPath != "" {
+		return fmt.Errorf("encoded paths are prohibited")
+	}
+	host, portText, err := net.SplitHostPort(u.Host)
+	if err != nil || portText == "" {
+		return fmt.Errorf("an explicit host and port are required")
+	}
+	if host != "127.0.0.1" && host != "::1" {
+		return fmt.Errorf("host must be exactly 127.0.0.1 or [::1]")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
+		return fmt.Errorf("port must be a canonical integer from 1 through 65535")
+	}
+	if u.Host != net.JoinHostPort(host, portText) {
+		return fmt.Errorf("host and port must use canonical URL syntax")
+	}
+	return nil
 }
 
 // applyLinuxSinkDefaults sets Linux-appropriate sink defaults. Linux cannot

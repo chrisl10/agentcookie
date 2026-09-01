@@ -8,8 +8,8 @@ The agent should:
 
 1. Detect Tailscale and identify the peer machine.
 2. Confirm source vs sink with you.
-3. Run `agentcookie wizard install --as source` here on the Mac, in the background.
-4. Read the pairing code from `~/.agentcookie/pairing.json` once it appears.
+3. Run `agentcookie wizard install --as source` here on the Mac in an owner-attended terminal. Do not background or redirect it.
+4. Read only the nonsecret peer/address metadata from `~/.agentcookie/pairing.json`. Ask the owner to enter the code through the sink command's hidden stdin prompt; the agent must never read, persist, or relay it.
 5. SSH to the Linux box and:
    - Install the agentcookie binary
    - Write `sink.yaml` with `live_cdp.enabled: true` and the tailnet IP
@@ -28,10 +28,11 @@ Total elapsed time: about 60 seconds. You do not need to be at the Linux box's s
 The wizard works on macOS sinks:
 
 ```bash
-ssh <mac-mini-hostname> "agentcookie wizard install --as sink \
-  --peer <source-hostname> \
-  --code <code> \
-  --pair-url <url>"
+read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
+printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | ssh <mac-mini-hostname> \
+  "agentcookie wizard install --as sink --peer <source-hostname> \
+  --pair-url <url> --code-stdin"
+unset AGENTCOOKIE_PAIR_CODE
 ```
 
 ## When the prompt is not enough

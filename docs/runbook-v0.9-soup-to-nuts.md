@@ -22,8 +22,11 @@ This expands the partition list and triggers the Always Allow prompt.
 You may be asked for your login keychain password once.
 
 ```
-agentcookie wizard install --as sink --peer <source-host> \
-  --code <pair-code> --pair-url http://<source-host>:9998/pair
+read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
+printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie wizard install --as sink \
+  --peer <source-host> --pair-url http://<source-host>:9998/pair \
+  --code-stdin
+unset AGENTCOOKIE_PAIR_CODE
 ```
 
 If pairing already exists, the wizard skips that and just runs the

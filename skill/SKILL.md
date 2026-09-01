@@ -57,14 +57,13 @@ Or build from source:
 go install github.com/mvanhorn/agentcookie/cmd/agentcookie@v1.0.0
 ```
 
-Run the source wizard. It blocks until pairing completes:
+Run the source wizard in an owner-attended foreground terminal. It blocks until pairing completes and writes the one-time code only to that controlling terminal:
 
 ```bash
-agentcookie wizard install --as source --peer <linux-hostname> &
-WIZARD_PID=$!
+agentcookie wizard install --as source --peer <linux-hostname>
 ```
 
-Run in the background because we need to poll the pairing info file:
+In a separate agent session, poll only for the nonsecret routing metadata:
 
 ```bash
 # Wait up to 30 seconds for the pairing info to appear.
@@ -72,10 +71,10 @@ for i in {1..120}; do
   if [ -f ~/.agentcookie/pairing.json ]; then break; fi
   sleep 0.25
 done
-cat ~/.agentcookie/pairing.json
+cat ~/.agentcookie/pairing.json  # peer, pair_url, sink_run, status; never code
 ```
 
-Extract `code` and `pair_url` from the JSON output. These are what the sink needs. The code expires in 10 minutes.
+Extract only `pair_url` from the JSON. The attending owner reads the 10-minute code directly from the source terminal and enters it at the sink's hidden stdin prompt. Agents must never read, persist, relay, or log the code.
 
 ### Step 3: install on the Linux sink
 
@@ -118,10 +117,12 @@ domains: []
 EOF
 
 # Pair with the Mac source
-agentcookie pair --as sink \
+read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
+printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \
   --peer <mac-hostname> \
-  --code <code-from-pairing.json> \
-  --pair-url <pair_url-from-pairing.json>
+  --pair-url <pair_url-from-pairing.json> \
+  --code-stdin
+unset AGENTCOOKIE_PAIR_CODE
 ```
 
 ### Step 4: attach to existing Chrome (or start one as fallback)
@@ -212,10 +213,12 @@ For Mac-to-Mac, the wizard works:
 
 ```bash
 # On the second Mac
-agentcookie wizard install --as sink \
+read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
+printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie wizard install --as sink \
   --peer <source-mac-hostname> \
-  --code <pairing-code> \
-  --pair-url http://<source-mac>:9998/pair
+  --pair-url http://<source-mac>:9998/pair \
+  --code-stdin
+unset AGENTCOOKIE_PAIR_CODE
 ```
 
 The macOS sink writes to Chrome's encrypted SQLite, the plaintext sidecar, and per-CLI adapter session files.

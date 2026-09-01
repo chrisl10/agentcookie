@@ -15,8 +15,8 @@
 # Optional flags:
 #   --peer <hostname>          Tailscale hostname of the OTHER machine.
 #                              If omitted, the script prompts interactively.
-#   --code <code>              [sink] Pairing code printed by the source's
-#                              wizard install. Forwarded to wizard install.
+#   --code-stdin               [sink] Read the pairing code from stdin.
+#                              Pairing codes in argv are rejected.
 #   --pair-url <url>           [sink] Source's pairing URL (e.g.
 #                              http://<source>:9998/pair). Forwarded to wizard install.
 #   --skip-keychain-prompt     [sink] Forwarded to wizard install. Auto-set
@@ -43,7 +43,7 @@ set -euo pipefail
 
 ROLE=""
 PEER=""
-CODE=""
+CODE_STDIN=""
 PAIR_URL=""
 SKIP_KEYCHAIN_PROMPT=""
 EXTRA_WIZARD_ARGS=()
@@ -81,7 +81,9 @@ while [[ $# -gt 0 ]]; do
     --peer)
       PEER="$2"; shift 2 ;;
     --code)
-      CODE="$2"; shift 2 ;;
+      die "--code was removed because process arguments can leak pairing codes; pipe the code to --code-stdin" ;;
+    --code-stdin)
+      CODE_STDIN="1"; shift ;;
     --pair-url)
       PAIR_URL="$2"; shift 2 ;;
     --skip-keychain-prompt)
@@ -149,7 +151,7 @@ if [[ -z "$TARBALL" ]]; then
   step "downloading latest release from $REPO"
   TMP_DL="$(mktemp -d -t agentcookie-beta.XXXXXX)"
   gh release download --repo "$REPO" --pattern '*darwin_arm64.tar.gz' --dir "$TMP_DL" --clobber
-  TARBALL="$(ls -1 "$TMP_DL"/*.tar.gz | head -n1)"
+  TARBALL="$(find "$TMP_DL" -maxdepth 1 -type f -name '*.tar.gz' -print | head -n1)"
   if [[ -z "$TARBALL" || ! -f "$TARBALL" ]]; then
     die "release tarball not found after download (looked in $TMP_DL)"
   fi
@@ -221,15 +223,19 @@ if [[ -z "$PEER" ]]; then
   prompt PEER "peer hostname"
 fi
 
-# Sink-only: collect the pair code and pair URL from the source's
-# wizard install output. Both are required (the wizard refuses to
-# start without them) so prompt if not passed.
+# Sink-only: read the pair code without ever putting it in argv, and collect
+# the pair URL from the source's wizard output.
 if [[ "$ROLE" == "sink" ]]; then
-  if [[ -z "$CODE" ]]; then
+  if [[ -n "$CODE_STDIN" ]]; then
+    IFS= read -r CODE || die "could not read pairing code from stdin"
+  else
     echo "    Paste the pairing code printed by the source's wizard install"
     echo "    (looks like 'XXXX-YYYY-ZZZZ'):"
-    prompt CODE "pair code"
+    read -rsp "    pair code: " CODE
+    printf '\n'
   fi
+  [[ -n "$CODE" ]] || die "pairing code from stdin is empty"
+  trap 'unset CODE' EXIT
   if [[ -z "$PAIR_URL" ]]; then
     echo "    Paste the pair URL printed by the source's wizard install"
     echo "    (looks like 'http://<source-host>:9998/pair'):"
@@ -239,7 +245,7 @@ fi
 
 WIZARD_ARGS=(wizard install --as "$ROLE" --peer "$PEER")
 if [[ "$ROLE" == "sink" ]]; then
-  WIZARD_ARGS+=(--code "$CODE" --pair-url "$PAIR_URL")
+  WIZARD_ARGS+=(--code-stdin --pair-url "$PAIR_URL")
 fi
 for b in "${EXTRA_BINS[@]:-}"; do
   [[ -z "$b" ]] && continue
@@ -273,7 +279,12 @@ if [[ -n "$SKIP_KEYCHAIN_PROMPT" ]]; then
   WIZARD_ARGS+=(--skip-keychain-prompt)
 fi
 
-"$TARGET" "${WIZARD_ARGS[@]}"
+if [[ "$ROLE" == "sink" ]]; then
+  printf '%s\n' "$CODE" | "$TARGET" "${WIZARD_ARGS[@]}"
+  unset CODE
+else
+  "$TARGET" "${WIZARD_ARGS[@]}"
+fi
 
 # ---- final doctor check ----
 

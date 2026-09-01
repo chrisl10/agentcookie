@@ -3,11 +3,13 @@ package livecdp
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
@@ -212,6 +214,9 @@ func explicitContextSet(browserCtx context.Context) (map[cdp.BrowserContextID]bo
 // a tab the agent is driving.
 func injectIntoContext(browserCtx context.Context, ctxID cdp.BrowserContextID, useID bool, cookies []chrome.Cookie) error {
 	params := BuildCookieParams(cookies)
+	if len(params) != len(cookies) {
+		return fmt.Errorf("cookie parameter shaping rejected an input cookie")
+	}
 	if len(params) == 0 {
 		return nil
 	}
@@ -224,8 +229,43 @@ func injectIntoContext(browserCtx context.Context, ctxID cdp.BrowserContextID, u
 		if err := sc.Do(bctx); err != nil {
 			return fmt.Errorf("Storage.setCookies (%d cookies, ctx=%q useID=%v): %w", len(params), ctxID, useID, err)
 		}
+		gc := storage.GetCookies()
+		if useID {
+			gc = gc.WithBrowserContextID(ctxID)
+		}
+		stored, err := gc.Do(bctx)
+		if err != nil {
+			return fmt.Errorf("Storage.getCookies readback failed")
+		}
+		for _, expected := range params {
+			found := false
+			for _, got := range stored {
+				if got.Name == expected.Name && got.Value == expected.Value && got.Path == expected.Path && normalizeCookieDomain(got.Domain) == expectedCookieHost(expected) && got.Secure == expected.Secure && got.HTTPOnly == expected.HTTPOnly && got.SameSite == expected.SameSite {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("Storage.getCookies did not verify every injected cookie")
+			}
+		}
 		return nil
 	}))
+}
+
+func expectedCookieHost(cookie *network.CookieParam) string {
+	if cookie.Domain != "" {
+		return normalizeCookieDomain(cookie.Domain)
+	}
+	parsed, err := url.Parse(cookie.URL)
+	if err != nil {
+		return ""
+	}
+	return normalizeCookieDomain(parsed.Hostname())
+}
+
+func normalizeCookieDomain(domain string) string {
+	return strings.ToLower(strings.TrimPrefix(domain, "."))
 }
 
 // shouldInjectTarget reports whether a target should receive cookies: real

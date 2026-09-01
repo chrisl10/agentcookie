@@ -1,15 +1,19 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/mvanhorn/agentcookie/internal/config"
 	"github.com/mvanhorn/agentcookie/internal/keystore"
 	"github.com/mvanhorn/agentcookie/internal/pairing"
+	"github.com/mvanhorn/agentcookie/internal/protocol"
 	"github.com/mvanhorn/agentcookie/internal/tsclient"
 )
 
@@ -18,7 +22,7 @@ var (
 	pairListenAddr string
 	pairLocalName  string
 	pairPeerURL    string
-	pairCode       string
+	pairCodeStdin  bool
 	pairPeerHost   string
 )
 
@@ -32,8 +36,11 @@ var pairCmd = &cobra.Command{
 That prints a one-time pairing code and the source hostname + URL. Within
 ten minutes, run on the sink machine:
 
-  agentcookie pair --as sink --peer <source-hostname> \\
-    --pair-url http://<source-hostname>:9998/pair --code <code>
+  read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
+  printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \\
+    --peer <source-hostname> --pair-url http://<source-hostname>:9998/pair \\
+    --code-stdin
+  unset AGENTCOOKIE_PAIR_CODE
 
 Both sides derive a 32-byte symmetric key from an X25519 exchange salted
 with the pairing code (HKDF-SHA256, info "agentcookie-pair-v1"). The
@@ -55,7 +62,7 @@ func init() {
 	pairCmd.Flags().StringVar(&pairListenAddr, "listen", "", "[source] address to listen on for the sink handshake (default: this machine's Tailscale 100.x:9998)")
 	pairCmd.Flags().StringVar(&pairLocalName, "local-name", "", "hostname identifier announced to the peer (defaults to os.Hostname)")
 	pairCmd.Flags().StringVar(&pairPeerURL, "pair-url", "", "[sink] full URL of the source's /pair endpoint")
-	pairCmd.Flags().StringVar(&pairCode, "code", "", "[sink] pairing code printed by the source")
+	pairCmd.Flags().BoolVar(&pairCodeStdin, "code-stdin", false, "[sink] read the required pairing code from stdin")
 	pairCmd.Flags().StringVar(&pairPeerHost, "peer", "", "[sink] source machine's hostname (also used as filename for the derived key)")
 }
 
@@ -67,7 +74,7 @@ func runPair(cmd *cobra.Command, args []string) error {
 	case "source":
 		return runPairAsSource(cmd.Context())
 	case "sink":
-		return runPairAsSink(cmd.Context())
+		return runPairAsSink(cmd.Context(), cmd.InOrStdin())
 	default:
 		return fmt.Errorf("--as is required and must be 'source' or 'sink'")
 	}
@@ -87,7 +94,12 @@ func runPairAsSource(ctx context.Context) error {
 	} else if err := validateListenAddr(listenAddr); err != nil {
 		return fmt.Errorf("pair listen %q: %w", listenAddr, err)
 	}
-	res, _, err := pairing.RunSource(ctx, listenAddr, pairLocalName, os.Stderr)
+	secretTTY, err := openPairingSecretTTY()
+	if err != nil {
+		return err
+	}
+	defer secretTTY.Close()
+	res, err := pairing.RunSource(ctx, listenAddr, pairLocalName, os.Stderr, secretTTY)
 	if err != nil {
 		return err
 	}
@@ -106,17 +118,22 @@ func runPairAsSource(ctx context.Context) error {
 	return nil
 }
 
-func runPairAsSink(ctx context.Context) error {
+func runPairAsSink(ctx context.Context, input io.Reader) error {
 	if pairPeerURL == "" {
 		return fmt.Errorf("--pair-url is required when --as sink")
 	}
-	if pairCode == "" {
-		return fmt.Errorf("--code is required when --as sink")
+	if !pairCodeStdin {
+		return fmt.Errorf("--code-stdin is required when --as sink; pairing codes in process arguments are not supported")
 	}
+	pairCode, err := readPairingCode(input)
+	if err != nil {
+		return err
+	}
+	defer func() { pairCode = "" }()
 	if pairPeerHost == "" {
 		return fmt.Errorf("--peer is required when --as sink (the source machine's hostname)")
 	}
-	res, err := pairing.RunSink(ctx, pairPeerURL, pairing.Code(pairCode), pairLocalName)
+	res, err := pairing.RunSink(ctx, pairPeerURL, pairCode, pairLocalName)
 	if err != nil {
 		return err
 	}
@@ -127,10 +144,47 @@ func runPairAsSink(ctx context.Context) error {
 		Fingerprint: res.Fingerprint,
 		ProtocolVer: pairing.ProtocolVersion,
 	}
+	sinkCfg, cfgErr := config.LoadSink(common.ConfigDir)
+	if cfgErr != nil {
+		return fmt.Errorf("load sink config before saving pair key: %w", cfgErr)
+	}
+	if sinkCfg.HardenedLiveCDP {
+		if err := protocol.InitializeRequiredSequenceState(sinkCfg.ReplayStatePath); err != nil {
+			return fmt.Errorf("initialize hardened replay state before saving pair key: %w", err)
+		}
+	}
 	if err := keystore.Save(common.ConfigDir, pk); err != nil {
 		return fmt.Errorf("save key: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "agentcookie pair: paired with source %q (fingerprint %s)\n", pairPeerHost, res.Fingerprint)
 	fmt.Fprintf(os.Stderr, "  key saved to %s/keys/%s.json (mode 0600)\n", common.ConfigDir, pairPeerHost)
 	return nil
+}
+
+func openPairingSecretTTY() (*os.File, error) {
+	secretTTY, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open controlling terminal for owner-attended pairing code: %w", err)
+	}
+	return secretTTY, nil
+}
+
+func readPairingCode(input io.Reader) (pairing.Code, error) {
+	value, err := bufio.NewReader(io.LimitReader(input, 257)).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", fmt.Errorf("read pairing code from stdin")
+	}
+	code := strings.TrimSpace(value)
+	if len(code) > 128 {
+		return "", fmt.Errorf("pairing code from stdin is too long")
+	}
+	if len(code) < 8 {
+		return "", fmt.Errorf("pairing code from stdin is too short")
+	}
+	for _, character := range code {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-') {
+			return "", fmt.Errorf("pairing code from stdin has invalid characters")
+		}
+	}
+	return pairing.Code(code), nil
 }
