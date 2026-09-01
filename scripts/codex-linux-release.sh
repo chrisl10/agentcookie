@@ -11,6 +11,7 @@ WORKFLOW_FILE="${REPO_ROOT}/.github/workflows/codex-linux-release.yml"
 source "$LOCK_FILE"
 
 PATCHED_FILES=(
+  .github/workflows/release.yml
   README.md
   docs/architecture.md
   docs/consumption.md
@@ -45,6 +46,7 @@ PATCHED_FILES=(
 
 ALLOWED_DELTA=(
   .github/workflows/codex-linux-release.yml
+  .github/workflows/release.yml
   README.md
   docs/architecture.md
   docs/consumption.md
@@ -185,6 +187,11 @@ check_locks() {
     || die "workflow contains a floating action reference"
   grep -Fq "refs/tags/${CODEX_RELEASE_TAG}" "$WORKFLOW_FILE" \
     || die "workflow exact-tag publication guard is absent"
+  grep -Fq '      - "!v*-codex.*"' .github/workflows/release.yml \
+    || die "upstream release workflow is not excluded from Codex release tags"
+  # shellcheck disable=SC2016 # Match the literal Actions expression syntax.
+  ! grep -Fq 'if: ${{ secrets.' .github/workflows/release.yml \
+    || die "upstream release workflow contains invalid direct secret conditions"
   grep -Fq 'environment: prd005-release' "$WORKFLOW_FILE" \
     || die "workflow protected release environment is absent"
   # shellcheck disable=SC2016 # Verify the literal Actions runtime expression.

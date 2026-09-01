@@ -1,3 +1,52 @@
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 0f9c94dc1ccf7d35f4a08d05148ee3a7e57d7c07..dda428eadcaca3c4664dab0556c64d6448d483e2 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -4,6 +4,7 @@ on:
+   push:
+     tags:
+       - "v*"
++      - "!v*-codex.*"
+ 
+ permissions:
+   contents: write
+@@ -49,6 +50,9 @@ jobs:
+   build-darwin:
+     runs-on: macos-latest
+     if: ${{ vars.RELEASE_CI_ENABLED == 'true' }}
++    env:
++      HAS_CERTIFICATE_OSX_APPLICATION: ${{ secrets.CERTIFICATE_OSX_APPLICATION != '' }}
++      HAS_AC_NOTARY_PASSWORD: ${{ secrets.AC_NOTARY_PASSWORD != '' }}
+     steps:
+       - uses: actions/checkout@v4
+         with:
+@@ -60,7 +64,7 @@ jobs:
+           cache: true
+ 
+       - name: import Developer ID cert
+-        if: ${{ secrets.CERTIFICATE_OSX_APPLICATION != '' }}
++        if: ${{ env.HAS_CERTIFICATE_OSX_APPLICATION == 'true' }}
+         uses: apple-actions/import-codesign-certs@v3
+         with:
+           p12-file-base64: ${{ secrets.CERTIFICATE_OSX_APPLICATION }}
+@@ -70,7 +74,7 @@ jobs:
+         run: security find-identity -v -p codesigning
+ 
+       - name: setup notarytool credentials
+-        if: ${{ secrets.AC_NOTARY_PASSWORD != '' }}
++        if: ${{ env.HAS_AC_NOTARY_PASSWORD == 'true' }}
+         run: |
+           xcrun notarytool store-credentials agentcookie-notary \
+             --apple-id mvanhorn@gmail.com \
+@@ -118,7 +122,7 @@ jobs:
+       - name: generate checksums
+         run: |
+           cd dist
+-          sha256sum *.tar.gz > checksums.txt
++          sha256sum -- ./*.tar.gz > checksums.txt
+           cat checksums.txt
+ 
+       # Create the GitHub release with all assets
 diff --git a/README.md b/README.md
 index 396dfadfe00e82b1067c87b7baeb61de3d5f5248..5996b9ecf717c71ad207b5e1597adb224791d9c0 100644
 --- a/README.md
