@@ -1,0 +1,2516 @@
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 0f9c94dc1ccf7d35f4a08d05148ee3a7e57d7c07..dda428eadcaca3c4664dab0556c64d6448d483e2 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -4,6 +4,7 @@ on:
+   push:
+     tags:
+       - "v*"
++      - "!v*-codex.*"
+ 
+ permissions:
+   contents: write
+@@ -49,6 +50,9 @@ jobs:
+   build-darwin:
+     runs-on: macos-latest
+     if: ${{ vars.RELEASE_CI_ENABLED == 'true' }}
++    env:
++      HAS_CERTIFICATE_OSX_APPLICATION: ${{ secrets.CERTIFICATE_OSX_APPLICATION != '' }}
++      HAS_AC_NOTARY_PASSWORD: ${{ secrets.AC_NOTARY_PASSWORD != '' }}
+     steps:
+       - uses: actions/checkout@v4
+         with:
+@@ -60,7 +64,7 @@ jobs:
+           cache: true
+ 
+       - name: import Developer ID cert
+-        if: ${{ secrets.CERTIFICATE_OSX_APPLICATION != '' }}
++        if: ${{ env.HAS_CERTIFICATE_OSX_APPLICATION == 'true' }}
+         uses: apple-actions/import-codesign-certs@v3
+         with:
+           p12-file-base64: ${{ secrets.CERTIFICATE_OSX_APPLICATION }}
+@@ -70,7 +74,7 @@ jobs:
+         run: security find-identity -v -p codesigning
+ 
+       - name: setup notarytool credentials
+-        if: ${{ secrets.AC_NOTARY_PASSWORD != '' }}
++        if: ${{ env.HAS_AC_NOTARY_PASSWORD == 'true' }}
+         run: |
+           xcrun notarytool store-credentials agentcookie-notary \
+             --apple-id mvanhorn@gmail.com \
+@@ -118,7 +122,7 @@ jobs:
+       - name: generate checksums
+         run: |
+           cd dist
+-          sha256sum *.tar.gz > checksums.txt
++          sha256sum -- ./*.tar.gz > checksums.txt
+           cat checksums.txt
+ 
+       # Create the GitHub release with all assets
+diff --git a/README.md b/README.md
+index 396dfadfe00e82b1067c87b7baeb61de3d5f5248..5996b9ecf717c71ad207b5e1597adb224791d9c0 100644
+--- a/README.md
++++ b/README.md
+@@ -111,11 +111,10 @@ go install github.com/mvanhorn/agentcookie/cmd/agentcookie@v1.0.0
+ # 1. Run the source wizard (interactive)
+ agentcookie wizard install --as source --peer <linux-tailscale-hostname>
+ 
+-# The wizard prints a pairing code and URL. Keep this terminal open.
+-# Example output:
+-#   Pairing code: ABCD-EFGH-IJKL
+-#   Pair URL: http://your-mac.tailnet:9998/pair
+-#   Waiting for sink to pair...
++# The wizard writes the code only to this controlling terminal and records
++# only nonsecret peer/address metadata in pairing.json. Keep it open.
++# The one-time value appears only on this controlling terminal.
++# Redirected status output contains the pair URL and waiting state, never code.
+ ```
+ 
+ ### Linux sink setup (featured: Grok Bot / trusted single-operator box)
+@@ -151,10 +150,12 @@ domains: []
+ EOF
+ 
+ # 5. Pair with the Mac source
+-agentcookie pair --as sink \
++read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
++printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \
+   --peer your-mac.tailnet \
+-  --code ABCD-EFGH-IJKL \
+-  --pair-url http://your-mac.tailnet:9998/pair
++  --pair-url http://your-mac.tailnet:9998/pair \
++  --code-stdin
++unset AGENTCOOKIE_PAIR_CODE
+ ```
+ 
+ Replace:
+@@ -264,10 +265,12 @@ macOS sinks are still supported. The wizard works:
+ 
+ ```bash
+ # On the second Mac
+-agentcookie wizard install --as sink \
++read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
++printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie wizard install --as sink \
+   --peer <source-mac-hostname> \
+-  --code <pairing-code> \
+-  --pair-url http://<source-mac>:9998/pair
++  --pair-url http://<source-mac>:9998/pair \
++  --code-stdin
++unset AGENTCOOKIE_PAIR_CODE
+ ```
+ 
+ The macOS sink writes to Chrome's encrypted SQLite, the plaintext sidecar, and per-CLI adapter session files. It can also run CDP injection into a managed Chrome subprocess. See [docs/quickstart.md](docs/quickstart.md) for the full macOS-to-macOS walkthrough.
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 5637142e6bca9f80a5715aa013b628f0cab902bb..f6715875d8d22921bd598810e4db704d6a182931 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -97,8 +97,8 @@ On the sink, in the `/sync` handler:
+ 
+ ## Lifecycle: pairing
+ 
+-1. Source: `agentcookie pair --as source` generates an X25519 ephemeral keypair and a fresh base32 code (e.g. `YILU-OIVK`). Listens on `:9998/pair`. Prints the code and the sink-run command.
+-2. Sink: `agentcookie pair --as sink --peer <source-host> --pair-url ... --code YILU-OIVK` generates its own X25519 keypair, POSTs `(code, sink_pub, sink_hostname)` to source.
++1. Source: `agentcookie pair --as source` generates an X25519 ephemeral keypair and a fresh base32 code (e.g. `YILU-OIVK`). It auto-detects and binds only the source's Tailscale `100.x` address, such as `100.98.176.68:9998`; wildcard and non-Tailnet binds are refused. The code is written only to the owner's controlling terminal.
++2. Sink: `printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink --peer <source-host> --pair-url http://100.98.176.68:9998/pair --code-stdin` reads the code from stdin, generates its own X25519 keypair, and POSTs `(code, sink_pub, sink_hostname)` to the exact Tailnet-only source endpoint.
+ 3. Source checks the code (constant-time compare). Computes `shared = X25519(source_priv, sink_pub)`. Derives `key = HKDF-SHA256(shared, salt=code, info="agentcookie-pair-v1")[:32]`. Replies with `(source_pub, source_hostname, fingerprint)`.
+ 4. Sink computes the same `shared`, derives the same key. Verifies the source's fingerprint matches its own. Writes the key to `~/.config/agentcookie/keys/<source-host>.json` mode 0600.
+ 5. Source's listener shuts down; the key it derived is also written to disk on the source side, keyed by the sink's hostname.
+diff --git a/docs/consumption.md b/docs/consumption.md
+index 5fa6ff8e144de57221788c959f7b11b59e70e5cc..f940097268a3e053b1b7333335ae3746f7d7682e 100644
+--- a/docs/consumption.md
++++ b/docs/consumption.md
+@@ -117,11 +117,15 @@ Chrome via CDP instead of writing Chrome's SQLite.
+    ```bash
+    # On Mac (source):
+    agentcookie wizard install --as source --peer <linux-tailscale-hostname>
+-   # The wizard prints a pairing code and URL
++   # The code appears only on the owner's controlling terminal; pairing.json
++   # contains nonsecret peer/address metadata, not the code.
+ 
+    # On Linux (sink):
+-   agentcookie pair --as sink --peer <mac-hostname> \
+-     --pair-url http://<mac-hostname>:9998/pair --code <code>
++   read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
++   printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \
++     --peer <mac-hostname> --pair-url http://<mac-hostname>:9998/pair \
++     --code-stdin
++   unset AGENTCOOKIE_PAIR_CODE
+    ```
+ 
+ 4. **Start Chrome with CDP enabled**:
+diff --git a/docs/dry-run-2026-05-19.md b/docs/dry-run-2026-05-19.md
+index 7678ef4de1b6df25f41e9e713687874fa73bc1f4..97e4064f39b506fb47149cc5c222b2f5decb9e86 100644
+--- a/docs/dry-run-2026-05-19.md
++++ b/docs/dry-run-2026-05-19.md
+@@ -25,7 +25,7 @@ Setup:
+ 
+ **#7 install-beta.sh tarball extraction is broken.** Script does `tar -xzf "$TARBALL" -C "$WORK"` then looks for `$WORK/agentcookie`, but `release-tarball.sh` wraps everything in a top-level `agentcookie-${VERSION}-darwin-arm64/` directory. Every friend will hit `die "agentcookie binary not found inside tarball"`. Fix: replace `NEW_BIN="$WORK/agentcookie"` with a `find`-based lookup, e.g. `NEW_BIN="$(find "$WORK" -name agentcookie -type f -perm -u+x | head -1)"`.
+ 
+-**#9 install-beta.sh has no --code / --pair-url passthrough.** Wizard install on sink role requires `--code` and `--pair-url` (per `agentcookie wizard install --help`), but `install-beta.sh` only forwards `--as`, `--peer`, `--extra-binary`. Friends running `./install-beta.sh --as sink` get `agentcookie: --code and --pair-url are required when --as sink` with no hint that the wrapping script is missing the flags. Fix: add `--code` and `--pair-url` flags to install-beta.sh's arg parser and `WIZARD_ARGS` construction.
++**#9 install-beta.sh originally had no stdin pairing-code / `--pair-url` passthrough.** This historical finding predated stdin-only pairing. Current sink installs require `--code-stdin` plus `--pair-url`; the old argv pairing-code proposal is obsolete and rejected. The wrapper now reads the code without echo and pipes it to the wizard rather than placing it in `WIZARD_ARGS`.
+ 
+ **#11 Wizard install triggers a Keychain prompt that can't be answered over SSH.** Default wizard run prints "triggering Chrome Safe Storage Keychain prompt (click 'Always Allow' when macOS asks)" then `exit status 36 (re-run after granting Always Allow, or pass --skip-keychain-prompt)`. The expected friend deployment is headless Mac mini accessed via SSH, where no one is at the screen to click. Workaround flag `--skip-keychain-prompt` exists but isn't surfaced by `install-beta.sh`. Fix: install-beta.sh should auto-detect headless invocation (no TTY on the Mac mini's GUI session) and add `--skip-keychain-prompt` to WIZARD_ARGS, with a clear post-install message saying "you'll need to grant Keychain access manually on first physical visit."
+ 
+@@ -44,7 +44,7 @@ Recovery from this state requires a physical visit to the Mac mini to grant Alwa
+ 
+ ### Major friction (degraded friend UX)
+ 
+-**#10 Source announces Bonjour hostname (`MacBook-Pro-8.local`), not Tailscale name (`macbook-pro-44`).** Friends copy-paste the command the source prints (`agentcookie pair --as sink --peer MacBook-Pro-8.local --pair-url http://100.98.176.68:9998/pair --code ...`) and end up using Bonjour for everything. Works on same LAN, breaks cross-network (Tailscale across two LANs). Fix: when Tailscale is detected, default `--local-name` to the Tailscale hostname.
++**#10 Source announces Bonjour hostname (`MacBook-Pro-8.local`), not Tailscale name (`macbook-pro-44`).** Friends copied the source command with the Bonjour peer name and ended up using Bonjour for everything. The stdin-safe equivalent is `printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink --peer MacBook-Pro-8.local --pair-url http://100.98.176.68:9998/pair --code-stdin`. It works on the same LAN but breaks cross-network (Tailscale across two LANs). Fix: when Tailscale is detected, default `--local-name` to the Tailscale hostname.
+ 
+ **#12-14 State lives in TWO dirs and reset is incomplete.**
+ 
+diff --git a/docs/dry-run-2026-05-21.md b/docs/dry-run-2026-05-21.md
+index 7f531491698302cf38b7fd0f69deffe065bede1b..8a7d7cdd97e18f92875bc1302b497b3028aa02dc 100644
+--- a/docs/dry-run-2026-05-21.md
++++ b/docs/dry-run-2026-05-21.md
+@@ -9,7 +9,7 @@ Setup:
+ - Release artifact: `v0.12.0-beta.3` published as prerelease at https://github.com/mvanhorn/agentcookie/releases/tag/v0.12.0-beta.3 (sha256 `4c9b749b3f53c3c971c22b6afb78f13d287998f824a13ab000b4de4a44710f8a`).
+ - Source: this laptop (Tailscale `macbook-pro-44`, Bonjour `MacBook-Pro-8.local`). Fully reset for this dry-run: stopped LaunchAgent, wiped `~/.agentcookie`, wiped `~/.config/agentcookie`. Re-installed via `install-beta.sh --as source --peer matts-mac-mini --bin-dir ~/bin --tarball <local v0.12.0-beta.3>`.
+ - Sink: `matts-mac-mini` (Tailscale), `moltbot-mini.hsd1.wa.comcast.net` (Bonjour). Fully reset: backup tarballs at `/tmp/agentcookie-mac-mini-pre-beta3-*.tar.gz` and `/tmp/agentcookie-mac-mini-config-pre-beta3-*.tar.gz`. Removed binary, runtime, config, LaunchAgent.
+-- Install method: `ssh matts-mac-mini ./install-beta.sh --as sink --peer MacBook-Pro-8.local --code <code> --pair-url <url> --tarball <local>`.
++- Install method (updated stdin-safe equivalent): `read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'; printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | ssh matts-mac-mini ./install-beta.sh --as sink --peer MacBook-Pro-8.local --pair-url <url> --tarball <local> --code-stdin; unset AGENTCOOKIE_PAIR_CODE`.
+ 
+ ## Verdict
+ 
+@@ -62,7 +62,7 @@ $ sqlite3 ~/.agentcookie/chrome-profile/Default/Cookies "SELECT COUNT(*) FROM co
+ 
+ ### Resolved by this release
+ 
+-- **#7, #9, #11, #14, #17, #18 (2026-05-19)** all gone. install-beta.sh tarball lookup, --code / --pair-url passthrough, no-TTY headless default, peer.hostname rewrite guard, source-side key filing under --peer, sink listener fails-loud — all working as designed.
++- **#7, #9, #11, #14, #17, #18 (2026-05-19)** all gone. install-beta.sh tarball lookup, stdin pairing-code / `--pair-url` passthrough, no-TTY headless default, peer.hostname rewrite guard, source-side key filing under `--peer`, sink listener fails-loud — all working as designed. The original argv pairing-code form is obsolete and rejected by current releases.
+ - **The Chrome Safe Storage Keychain prompt is dead** on a headless install. Zero GUI interactions required.
+ 
+ ### New friction (non-blocking, deferred)
+diff --git a/docs/plans/2026-05-21-001-feat-headless-sink-click-free-plan.md b/docs/plans/2026-05-21-001-feat-headless-sink-click-free-plan.md
+index eaa6c60f28759409944d337000c8361cee6a8ddf..3528866bc93f0a1aa5c4c1c0a9180e1cc92a79e1 100644
+--- a/docs/plans/2026-05-21-001-feat-headless-sink-click-free-plan.md
++++ b/docs/plans/2026-05-21-001-feat-headless-sink-click-free-plan.md
+@@ -293,7 +293,7 @@ writeYAMLIfMissing(sinkYAMLPath, renderSinkYAML(wizardPeer, listenAddr, skip), w
+ **Execution note:** This unit is the validation gate. If the dry-run surfaces blockers, file a follow-up plan rather than patching this plan; v0.12.0-beta.3 ships when this unit's verification passes.
+ 
+ **Test scenarios:**
+-- happy path (manual): SSH install on freshly-wiped Mac mini, friend runs `install-beta.sh --as sink --peer macbook-pro-44 --code <code> --pair-url <url>`. Zero GUI prompts. Sync succeeds within 30 seconds. `agentcookie doctor` reports green.
++- happy path (manual): SSH install on freshly-wiped Mac mini, friend runs `read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'`, then `printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | install-beta.sh --as sink --peer macbook-pro-44 --pair-url <url> --code-stdin`, then `unset AGENTCOOKIE_PAIR_CODE`. Zero GUI prompts. Sync succeeds within 30 seconds. `agentcookie doctor` reports green.
+ - happy path (manual): PP CLI (`instacart-pp-cli carts`) over SSH succeeds without auth login.
+ - happy path (manual): launching Chrome.app on the Mac mini against the agentcookie-owned profile shows synced cookies present (CDP injection round-trips through Chrome's own SQLite).
+ - regression: existing v0.12.0-beta.2 sink upgraded in place (binary swap, no config changes) keeps working in legacy mode (no behavior change for existing friends).
+diff --git a/docs/plans/2026-08-13-1720-feat-readme-howto-release-plan.md b/docs/plans/2026-08-13-1720-feat-readme-howto-release-plan.md
+index 35310fff39533e92d5e415b1c43d87693985478b..e8d372d1eff3f65a1eab777d53056314d874d459 100644
+--- a/docs/plans/2026-08-13-1720-feat-readme-howto-release-plan.md
++++ b/docs/plans/2026-08-13-1720-feat-readme-howto-release-plan.md
+@@ -41,7 +41,7 @@ No cookie values in any file. No CDP on the tailnet. Do not start a second Chrom
+ 4. Attach to the already-running box Chrome. Never `cdp.managed` / LaunchOwnedChrome / `:9400`.
+ 5. Doctor can print `sync-all` while `/sync` drops everything. Verify with ok-line `live_cdp: injected N cookies into M context(s)` and `LastWriteMode` containing `livecdp`, not the policy label. Linux `wrote 0 cookies` is expected. Sidecar is not success.
+ 6. Default CDP port 9223; doctor also probes 9222/9224/9228/9229/9400. How-to must say what to do when Chrome is on 9228.
+-7. Pairing: Mac `wizard install --as source --peer <linux-tailscale-name>`; user relays the pairing code (10-minute, not a cookie); Linux `pair` with `--code` and `--pair-url`. Cookie values must never appear.
++7. Pairing: Mac `wizard install --as source --peer <linux-tailscale-name>`; user relays the pairing code (10-minute, not a cookie); Linux reads it with hidden input and passes it through stdin using `--code-stdin` plus `--pair-url`. Pairing codes and cookie values must never appear in argv.
+ 8. Keep the sink alive: copy the wizard-printed systemd user unit (do not auto-install). Fresh browserUse only works while the sink is still polling.
+ 
+ ## Units (do all of these)
+diff --git a/docs/quickstart-beta.md b/docs/quickstart-beta.md
+index e4dd52499b45aab6e07498873e0f0c82919c6f39..8c4876f7844092f924ad780c6442fb071464fed8 100644
+--- a/docs/quickstart-beta.md
++++ b/docs/quickstart-beta.md
+@@ -39,9 +39,9 @@ Optional: Go 1.22+ if you want to build from source. Not required when using the
+    - Place it at `/usr/local/bin/agentcookie` (or `~/bin/agentcookie` if you don't have admin)
+    - Prompt for the sink machine's Tailscale hostname (e.g. `second-mac`)
+    - Run `agentcookie wizard install --as source --peer <sink>` interactively
+-   - End by printing a pairing code
++   - Show the pairing code only on the owner-attended controlling terminal
+ 
+-Save the pairing code. You'll need it on the sink.
++Keep the source terminal open. The code is not written to `pairing.json` or logs; enter it through the sink's hidden stdin prompt.
+ 
+ Cookie policy note: the default `blocklist.yaml` remains opt-out and syncs
+ everything unless a host matches a listed pattern. For a stricter headless agent
+@@ -55,7 +55,7 @@ Same flow, opposite role:
+ 
+ 1. SSH or screen-share into your sink Mac.
+ 2. Extract the same release tarball.
+-3. Run: `./install-beta.sh --as sink --peer <macbook> --code <pairing-code> --pair-url <pair-url>` (the source's wizard install printed the code + URL for you to copy here).
++3. Run `read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE`, then `printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | ./install-beta.sh --as sink --peer <macbook> --pair-url <pair-url> --code-stdin`, and finally `unset AGENTCOOKIE_PAIR_CODE`. The source's wizard install prints the code and URL.
+ 4. The script verifies the code signature, places the binary, runs `agentcookie wizard install --as sink ...`, and ends with `doctor`.
+ 
+ On a GUI install (you're at the sink's keyboard, or you opened Terminal locally), you'll see one Keychain prompt asking permission for `agentcookie` to access Chrome Safe Storage. Click **Always Allow**.
+diff --git a/docs/quickstart.md b/docs/quickstart.md
+index ba0646e0f612e32dd5dd0df014dbf1d87104ffb3..7f04c83d8fc358dd3d9eb36daba2d24e34033dcc 100644
+--- a/docs/quickstart.md
++++ b/docs/quickstart.md
+@@ -55,14 +55,18 @@ agentcookie pair --as source
+ You'll see:
+ 
+ ```
++agentcookie one-time pairing code: <shown only on the controlling terminal>
+ agentcookie pair (source side)
+-  pairing code: YILU-OIVK
++  pairing code: delivered directly to the controlling terminal
+   source hostname: my-laptop.tailnet.ts.net
+-  listening on: 0.0.0.0:9998
++  listening on: 100.98.176.68:9998
+ 
+   Run this on the sink machine within 10m0s
+-    agentcookie pair --as sink --peer my-laptop.tailnet.ts.net \
+-      --pair-url http://0.0.0.0:9998/pair --code YILU-OIVK
++    read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
++    printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \
++      --peer my-laptop.tailnet.ts.net \
++      --pair-url http://100.98.176.68:9998/pair --code-stdin
++    unset AGENTCOOKIE_PAIR_CODE
+ 
+   Waiting for sink...
+ ```
+@@ -70,9 +74,12 @@ agentcookie pair (source side)
+ On the sink:
+ 
+ ```
+-agentcookie pair --as sink --peer my-laptop.tailnet.ts.net \
+-  --pair-url http://my-laptop.tailnet.ts.net:9998/pair \
+-  --code YILU-OIVK
++read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
++printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \
++  --peer my-laptop.tailnet.ts.net \
++  --pair-url http://100.98.176.68:9998/pair \
++  --code-stdin
++unset AGENTCOOKIE_PAIR_CODE
+ ```
+ 
+ Both sides print a paired confirmation with a matching fingerprint.
+diff --git a/docs/runbook-v0.9-soup-to-nuts.md b/docs/runbook-v0.9-soup-to-nuts.md
+index 3ea14ae36ff1648ca75609007e8d4d29ad400392..30724c50cf1d5f80d265c16e43ed347b0016934d 100644
+--- a/docs/runbook-v0.9-soup-to-nuts.md
++++ b/docs/runbook-v0.9-soup-to-nuts.md
+@@ -22,8 +22,11 @@ This expands the partition list and triggers the Always Allow prompt.
+ You may be asked for your login keychain password once.
+ 
+ ```
+-agentcookie wizard install --as sink --peer <source-host> \
+-  --code <pair-code> --pair-url http://<source-host>:9998/pair
++read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
++printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie wizard install --as sink \
++  --peer <source-host> --pair-url http://<source-host>:9998/pair \
++  --code-stdin
++unset AGENTCOOKIE_PAIR_CODE
+ ```
+ 
+ If pairing already exists, the wizard skips that and just runs the
+diff --git a/go.mod b/go.mod
+index ca2db38c2f4c448ea82dac6f95f56a3dfa8d1896..74e5180b6754c9d0314843458bb3f5237f9c69b1 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,6 @@
+ module github.com/mvanhorn/agentcookie
+ 
+-go 1.26.4
++go 1.26.7
+ 
+ require (
+ 	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
+diff --git a/internal/cli/pair.go b/internal/cli/pair.go
+index 6066319d1759f23e123fbd79d2670180e1e61a79..7c5fb8f7f267ca6b2ab2cb7f7b61b32bddc473cc 100644
+--- a/internal/cli/pair.go
++++ b/internal/cli/pair.go
+@@ -1,15 +1,19 @@
+ package cli
+ 
+ import (
++	"bufio"
+ 	"context"
+ 	"fmt"
++	"io"
+ 	"os"
+ 	"strings"
+ 
+ 	"github.com/spf13/cobra"
+ 
++	"github.com/mvanhorn/agentcookie/internal/config"
+ 	"github.com/mvanhorn/agentcookie/internal/keystore"
+ 	"github.com/mvanhorn/agentcookie/internal/pairing"
++	"github.com/mvanhorn/agentcookie/internal/protocol"
+ 	"github.com/mvanhorn/agentcookie/internal/tsclient"
+ )
+ 
+@@ -18,7 +22,7 @@ var (
+ 	pairListenAddr string
+ 	pairLocalName  string
+ 	pairPeerURL    string
+-	pairCode       string
++	pairCodeStdin  bool
+ 	pairPeerHost   string
+ )
+ 
+@@ -32,8 +36,11 @@ var pairCmd = &cobra.Command{
+ That prints a one-time pairing code and the source hostname + URL. Within
+ ten minutes, run on the sink machine:
+ 
+-  agentcookie pair --as sink --peer <source-hostname> \\
+-    --pair-url http://<source-hostname>:9998/pair --code <code>
++  read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
++  printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \\
++    --peer <source-hostname> --pair-url http://<source-hostname>:9998/pair \\
++    --code-stdin
++  unset AGENTCOOKIE_PAIR_CODE
+ 
+ Both sides derive a 32-byte symmetric key from an X25519 exchange salted
+ with the pairing code (HKDF-SHA256, info "agentcookie-pair-v1"). The
+@@ -55,7 +62,7 @@ func init() {
+ 	pairCmd.Flags().StringVar(&pairListenAddr, "listen", "", "[source] address to listen on for the sink handshake (default: this machine's Tailscale 100.x:9998)")
+ 	pairCmd.Flags().StringVar(&pairLocalName, "local-name", "", "hostname identifier announced to the peer (defaults to os.Hostname)")
+ 	pairCmd.Flags().StringVar(&pairPeerURL, "pair-url", "", "[sink] full URL of the source's /pair endpoint")
+-	pairCmd.Flags().StringVar(&pairCode, "code", "", "[sink] pairing code printed by the source")
++	pairCmd.Flags().BoolVar(&pairCodeStdin, "code-stdin", false, "[sink] read the required pairing code from stdin")
+ 	pairCmd.Flags().StringVar(&pairPeerHost, "peer", "", "[sink] source machine's hostname (also used as filename for the derived key)")
+ }
+ 
+@@ -67,7 +74,7 @@ func runPair(cmd *cobra.Command, args []string) error {
+ 	case "source":
+ 		return runPairAsSource(cmd.Context())
+ 	case "sink":
+-		return runPairAsSink(cmd.Context())
++		return runPairAsSink(cmd.Context(), cmd.InOrStdin())
+ 	default:
+ 		return fmt.Errorf("--as is required and must be 'source' or 'sink'")
+ 	}
+@@ -87,7 +94,12 @@ func runPairAsSource(ctx context.Context) error {
+ 	} else if err := validateListenAddr(listenAddr); err != nil {
+ 		return fmt.Errorf("pair listen %q: %w", listenAddr, err)
+ 	}
+-	res, _, err := pairing.RunSource(ctx, listenAddr, pairLocalName, os.Stderr)
++	secretTTY, err := openPairingSecretTTY()
++	if err != nil {
++		return err
++	}
++	defer secretTTY.Close()
++	res, err := pairing.RunSource(ctx, listenAddr, pairLocalName, os.Stderr, secretTTY)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -106,17 +118,22 @@ func runPairAsSource(ctx context.Context) error {
+ 	return nil
+ }
+ 
+-func runPairAsSink(ctx context.Context) error {
++func runPairAsSink(ctx context.Context, input io.Reader) error {
+ 	if pairPeerURL == "" {
+ 		return fmt.Errorf("--pair-url is required when --as sink")
+ 	}
+-	if pairCode == "" {
+-		return fmt.Errorf("--code is required when --as sink")
++	if !pairCodeStdin {
++		return fmt.Errorf("--code-stdin is required when --as sink; pairing codes in process arguments are not supported")
++	}
++	pairCode, err := readPairingCode(input)
++	if err != nil {
++		return err
+ 	}
++	defer func() { pairCode = "" }()
+ 	if pairPeerHost == "" {
+ 		return fmt.Errorf("--peer is required when --as sink (the source machine's hostname)")
+ 	}
+-	res, err := pairing.RunSink(ctx, pairPeerURL, pairing.Code(pairCode), pairLocalName)
++	res, err := pairing.RunSink(ctx, pairPeerURL, pairCode, pairLocalName)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -127,6 +144,15 @@ func runPairAsSink(ctx context.Context) error {
+ 		Fingerprint: res.Fingerprint,
+ 		ProtocolVer: pairing.ProtocolVersion,
+ 	}
++	sinkCfg, cfgErr := config.LoadSink(common.ConfigDir)
++	if cfgErr != nil {
++		return fmt.Errorf("load sink config before saving pair key: %w", cfgErr)
++	}
++	if sinkCfg.HardenedLiveCDP {
++		if err := protocol.InitializeRequiredSequenceState(sinkCfg.ReplayStatePath); err != nil {
++			return fmt.Errorf("initialize hardened replay state before saving pair key: %w", err)
++		}
++	}
+ 	if err := keystore.Save(common.ConfigDir, pk); err != nil {
+ 		return fmt.Errorf("save key: %w", err)
+ 	}
+@@ -134,3 +160,33 @@ func runPairAsSink(ctx context.Context) error {
+ 	fmt.Fprintf(os.Stderr, "  key saved to %s/keys/%s.json (mode 0600)\n", common.ConfigDir, pairPeerHost)
+ 	return nil
+ }
++
++func openPairingSecretTTY() (*os.File, error) {
++	secretTTY, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
++	if err != nil {
++		return nil, fmt.Errorf("open controlling terminal for owner-attended pairing code: %w", err)
++	}
++	return secretTTY, nil
++}
++
++func readPairingCode(input io.Reader) (pairing.Code, error) {
++	value, err := bufio.NewReader(io.LimitReader(input, 257)).ReadString('\n')
++	if err != nil && err != io.EOF {
++		return "", fmt.Errorf("read pairing code from stdin")
++	}
++	code := strings.TrimSpace(value)
++	if len(code) > 128 {
++		return "", fmt.Errorf("pairing code from stdin is too long")
++	}
++	if len(code) < 8 {
++		return "", fmt.Errorf("pairing code from stdin is too short")
++	}
++	for _, character := range code {
++		if (character < 'a' || character > 'z') &&
++			(character < 'A' || character > 'Z') &&
++			(character < '0' || character > '9') && character != '-' {
++			return "", fmt.Errorf("pairing code from stdin has invalid characters")
++		}
++	}
++	return pairing.Code(code), nil
++}
+diff --git a/internal/cli/sink.go b/internal/cli/sink.go
+index 8d48ef95c61203e160b2d2b4abc275a094bde865..c5fd3ee26f584fcca1e1b790fdb3c31f743ce5ba 100644
+--- a/internal/cli/sink.go
++++ b/internal/cli/sink.go
+@@ -134,6 +134,9 @@ func runSink(cmd *cobra.Command, args []string) error {
+ 	// window). Operator recovery: delete ~/.agentcookie/sequence.json.
+ 	home, _ := os.UserHomeDir()
+ 	seqStore := protocol.NewFileSequenceStore(protocol.DefaultSequencePath(home))
++	if cfg.HardenedLiveCDP {
++		seqStore = protocol.NewRequiredFileSequenceStore(cfg.ReplayStatePath)
++	}
+ 	seqTracker, err := protocol.NewTrackerFromStore(seqStore)
+ 	if err != nil {
+ 		return fmt.Errorf("load replay-defense state: %w", err)
+@@ -234,11 +237,6 @@ func newSinkMux(
+ 		}
+ 		blockMatcher := protocol.NewBlocklistMatcherForSink(bl)
+ 
+-		if !seqTracker.Accept(envelope.SourceHostname, envelope.Sequence) {
+-			http.Error(w, fmt.Sprintf("sequence %d not greater than last seen for %q (replay defense)", envelope.Sequence, envelope.SourceHostname), http.StatusConflict)
+-			return
+-		}
+-
+ 		// Sink-side cookie policy filter (defense in depth).
+ 		cookies := envelope.Cookies
+ 		var droppedHosts map[string]int
+@@ -249,6 +247,16 @@ func newSinkMux(
+ 			dropped += n
+ 		}
+ 
++		if cfg.HardenedLiveCDP {
++			handleHardenedLiveCDPSync(w, r, cfg, &envelope, cookies, dropped, blockMatcher, seqTracker, stateWriter, sinkState, stateMu)
++			return
++		}
++
++		if !seqTracker.Accept(envelope.SourceHostname, envelope.Sequence) {
++			http.Error(w, "replay rejected", http.StatusConflict)
++			return
++		}
++
+ 		if sinkDryRun {
+ 			// Dump the accepted batch to stderr as JSON for inspection. Do NOT
+ 			// touch Chrome state.
+@@ -446,6 +454,105 @@ func newSinkMux(
+ 	return mux
+ }
+ 
++// liveCDPInject is an indirection seam for hardened handler tests.
++var liveCDPInject = livecdp.AttachAndInject
++
++// handleHardenedLiveCDPSync is deliberately a separate, short path. It never
++// invokes the sidecar, Chrome SQLite, storage archive, secrets bus, cmux, or
++// per-CLI adapter implementations. Its only permitted side effects, in order,
++// are live CDP injection, durable replay commit, truthful status, and ACK.
++func handleHardenedLiveCDPSync(
++	w http.ResponseWriter,
++	r *http.Request,
++	cfg *config.SinkConfig,
++	envelope *protocol.SyncEnvelope,
++	cookies []chrome.Cookie,
++	dropped int,
++	blockMatcher *protocol.BlocklistMatcher,
++	seqTracker *protocol.SequenceTracker,
++	stateWriter *state.Writer,
++	sinkState *state.SinkState,
++	stateMu *sync.Mutex,
++) {
++	if len(envelope.LocalStorageTarball) > 0 || len(envelope.IndexedDBTarball) > 0 || len(envelope.IndexedDBSkipped) > 0 || len(envelope.Secrets) > 0 {
++		err := fmt.Errorf("forbidden non-cookie payload")
++		// Reject prohibited payloads before status, filesystem, replay, CDP,
++		// or acknowledgement effects. The HTTP response is the only effect.
++		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
++		return
++	}
++	if len(cookies) == 0 {
++		err := fmt.Errorf("no allowlisted cookies to inject")
++		recordSinkReject(sinkState, stateWriter, stateMu, err)
++		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
++		return
++	}
++	reservation, ok := seqTracker.Reserve(envelope.SourceHostname, envelope.Sequence)
++	if !ok {
++		http.Error(w, "replay rejected", http.StatusConflict)
++		return
++	}
++	committed := false
++	defer func() {
++		if !committed {
++			reservation.Abort()
++		}
++	}()
++
++	endpoint := cfg.LiveCDP.Endpoint
++	if endpoint == "" {
++		endpoint = livecdp.DefaultCDPEndpoint
++	}
++	contexts, injectErr := liveCDPInject(r.Context(), endpoint, cookies)
++	if injectErr != nil || contexts == 0 {
++		// Never echo the CDP error: browser implementations may include cookie
++		// names or hosts in parameter-validation errors.
++		err := fmt.Errorf("live CDP injection failed")
++		recordSinkReject(sinkState, stateWriter, stateMu, err)
++		http.Error(w, err.Error(), http.StatusServiceUnavailable)
++		return
++	}
++	if err := reservation.Commit(); err != nil {
++		committed = true // Commit releases the reservation even on save failure.
++		safeErr := fmt.Errorf("durable replay commit failed")
++		recordSinkReject(sinkState, stateWriter, stateMu, safeErr)
++		http.Error(w, safeErr.Error(), http.StatusInsufficientStorage)
++		return
++	}
++	committed = true
++
++	stateMu.Lock()
++	now := time.Now().UTC()
++	sinkState.LastWrite = now
++	sinkState.LastWriteCount = len(cookies)
++	sinkState.LastWriteMode = "livecdp-hardened"
++	sinkState.LastError = ""
++	sinkState.TotalWrites++
++	sinkState.TotalDropped += dropped
++	if sinkState.LiveCDP == nil {
++		sinkState.LiveCDP = &state.LiveCDPState{Enabled: true, Endpoint: endpoint}
++	}
++	sinkState.LiveCDP.LastInjectAt = now
++	sinkState.LiveCDP.LastCookies = len(cookies)
++	sinkState.LiveCDP.LastContexts = contexts
++	sinkState.LiveCDP.LastError = ""
++	sinkState.LiveCDP.TotalInjects++
++	if err := stateWriter.Save(sinkState); err != nil {
++		// Replay is already durable, so never ACK a success that could not be
++		// recorded truthfully. The duplicate retry will fail closed and require
++		// operator reconciliation from the durable replay high-water mark.
++		sinkState.LastWriteMode = ""
++		sinkState.LastError = "truthful status persist failed"
++		sinkState.LiveCDP.LastError = "truthful status persist failed"
++		stateMu.Unlock()
++		http.Error(w, "truthful status persist failed", http.StatusInsufficientStorage)
++		return
++	}
++	stateMu.Unlock()
++
++	_, _ = fmt.Fprintf(w, "ok: injected %d cookies into %d context(s); dropped %d %s cookies\n", len(cookies), contexts, dropped, blockMatcher.DropLabel())
++}
++
+ func recordSinkReject(sinkState *state.SinkState, stateWriter *state.Writer, stateMu *sync.Mutex, err error) {
+ 	if sinkState == nil {
+ 		return
+diff --git a/internal/cli/sink_hardened_test.go b/internal/cli/sink_hardened_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..325368eb55a2e06687d73f73edd8fa35118e0268
+--- /dev/null
++++ b/internal/cli/sink_hardened_test.go
+@@ -0,0 +1,291 @@
++package cli
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/mvanhorn/agentcookie/internal/chrome"
++	"github.com/mvanhorn/agentcookie/internal/config"
++	"github.com/mvanhorn/agentcookie/internal/pairing"
++	"github.com/mvanhorn/agentcookie/internal/protocol"
++	"github.com/mvanhorn/agentcookie/internal/state"
++)
++
++func TestPairingCodesAreStdinOnly(t *testing.T) {
++	if flag := pairCmd.Flags().Lookup("code"); flag != nil {
++		t.Fatal("pair command still accepts the legacy --code argv flag")
++	}
++	pairStdinFlag := pairCmd.Flags().Lookup("code-stdin")
++	if pairStdinFlag == nil {
++		t.Fatal("pair command does not accept --code-stdin")
++	}
++	if flag := wizardInstallCmd.Flags().Lookup("code"); flag != nil {
++		t.Fatal("wizard install still accepts the legacy --code argv flag")
++	}
++	wizardStdinFlag := wizardInstallCmd.Flags().Lookup("code-stdin")
++	if wizardStdinFlag == nil {
++		t.Fatal("wizard install does not accept --code-stdin")
++	}
++	if err := pairStdinFlag.Value.Set("true"); err != nil || !pairCodeStdin {
++		t.Fatalf("pair --code-stdin was not accepted: enabled=%v err=%v", pairCodeStdin, err)
++	}
++	if err := pairStdinFlag.Value.Set("false"); err != nil {
++		t.Fatalf("reset pair --code-stdin: %v", err)
++	}
++	if err := wizardStdinFlag.Value.Set("true"); err != nil || !wizardCodeStdin {
++		t.Fatalf("wizard --code-stdin was not accepted: enabled=%v err=%v", wizardCodeStdin, err)
++	}
++	if err := wizardStdinFlag.Value.Set("false"); err != nil {
++		t.Fatalf("reset wizard --code-stdin: %v", err)
++	}
++
++	code, err := readPairingCode(strings.NewReader("ABCD-EFGH-IJKL\n"))
++	if err != nil {
++		t.Fatalf("read pairing code from stdin: %v", err)
++	}
++	if code != "ABCD-EFGH-IJKL" {
++		t.Fatal("stdin pairing code did not match")
++	}
++	listenUsage := wizardInstallCmd.Flags().Lookup("listen").Usage
++	if strings.Contains(listenUsage, "0.0.0.0") || !strings.Contains(listenUsage, "Tailscale") || !strings.Contains(listenUsage, "wildcard") {
++		t.Fatalf("wizard listener help does not describe safe tailnet detection/wildcard refusal: %q", listenUsage)
++	}
++}
++
++func TestWizardPairingMetadataNeverPersistsOrForwardsSentinelCode(t *testing.T) {
++	const sentinel = "SENT-INEL-CODE"
++	testRoot := t.TempDir()
++	infoPath := filepath.Join(testRoot, ".agentcookie", "pairing.json")
++	oldConfigDir := common.ConfigDir
++	oldPeer := wizardPeer
++	common.ConfigDir = filepath.Join(testRoot, "config")
++	wizardPeer = "sink.test"
++	t.Cleanup(func() {
++		common.ConfigDir = oldConfigDir
++		wizardPeer = oldPeer
++	})
++
++	var statusOutput bytes.Buffer
++	var secretOutput bytes.Buffer
++	var persistedDuringPairing []byte
++	runner := func(_ context.Context, _, _ string, statusWriter, secretWriter io.Writer) (*pairing.HandshakeResult, error) {
++		body, err := os.ReadFile(infoPath)
++		if err != nil {
++			return nil, fmt.Errorf("read pairing metadata during handshake: %w", err)
++		}
++		persistedDuringPairing = body
++		fmt.Fprintln(secretWriter, "agentcookie one-time pairing code:", sentinel)
++		fmt.Fprintln(statusWriter, "safe pairing status")
++		return &pairing.HandshakeResult{
++			Key:         bytes.Repeat([]byte{0x42}, 32),
++			Fingerprint: "safe-fingerprint",
++			RemotePeer:  "sink.test",
++		}, nil
++	}
++
++	result, err := beginSourcePairingWithRunner(context.Background(), "127.0.0.1:9998", "source.test", &statusOutput, &secretOutput, infoPath, runner)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(secretOutput.String(), sentinel) {
++		t.Fatal("owner-attended secret writer did not receive sentinel")
++	}
++	var metadata map[string]string
++	if err := json.Unmarshal(persistedDuringPairing, &metadata); err != nil {
++		t.Fatalf("decode nonsecret pairing metadata: %v", err)
++	}
++	if _, exists := metadata["code"]; exists {
++		t.Fatal("pairing.json retained a pairing-code field")
++	}
++	if metadata["peer"] == "" || metadata["pair_url"] == "" || metadata["status"] == "" {
++		t.Fatalf("pairing.json omitted required nonsecret metadata: %#v", metadata)
++	}
++	for label, candidate := range map[string]string{
++		"pairing.json": string(persistedDuringPairing),
++		"status/log":   statusOutput.String(),
++		"result":       fmt.Sprintf("%+v", result),
++	} {
++		if strings.Contains(candidate, sentinel) {
++			t.Fatalf("%s leaked sentinel pairing code", label)
++		}
++	}
++	if _, err := os.Stat(infoPath); !os.IsNotExist(err) {
++		t.Fatalf("pairing metadata artifact survived pairing: %v", err)
++	}
++	if err := filepath.WalkDir(testRoot, func(path string, entry os.DirEntry, walkErr error) error {
++		if walkErr != nil {
++			return walkErr
++		}
++		if entry.IsDir() {
++			return nil
++		}
++		body, err := os.ReadFile(path)
++		if err != nil {
++			return err
++		}
++		if bytes.Contains(body, []byte(sentinel)) {
++			return fmt.Errorf("artifact persisted sentinel pairing code: %s", path)
++		}
++		return nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++}
++
++type cliSecretWriterFunc func([]byte) (int, error)
++
++func (write cliSecretWriterFunc) Write(data []byte) (int, error) {
++	return write(data)
++}
++
++func TestWizardPairingSecretWriteFailureRemovesMetadataAndClosesListener(t *testing.T) {
++	testRoot := t.TempDir()
++	infoPath := filepath.Join(testRoot, ".agentcookie", "pairing.json")
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	addr := listener.Addr().String()
++	listener.Close()
++
++	var statusOutput bytes.Buffer
++	result, err := beginSourcePairing(
++		context.Background(),
++		addr,
++		"source.test",
++		&statusOutput,
++		cliSecretWriterFunc(func([]byte) (int, error) {
++			return 0, errors.New("injected controlling-terminal failure")
++		}),
++		infoPath,
++	)
++	if err == nil || result != nil {
++		t.Fatalf("secret delivery failure did not fail closed: result=%v err=%v", result != nil, err)
++	}
++	if statusOutput.Len() != 0 {
++		t.Fatal("status/log output was emitted after secret delivery failed")
++	}
++	if _, err := os.Stat(infoPath); !os.IsNotExist(err) {
++		t.Fatalf("pairing.json survived secret delivery failure: %v", err)
++	}
++	conn, dialErr := net.DialTimeout("tcp", addr, 100*time.Millisecond)
++	if dialErr == nil {
++		conn.Close()
++		t.Fatal("pair listener remained reachable after secret delivery failed")
++	}
++	if err := filepath.WalkDir(testRoot, func(path string, entry os.DirEntry, walkErr error) error {
++		if walkErr != nil {
++			return walkErr
++		}
++		if !entry.IsDir() {
++			return fmt.Errorf("secret delivery failure retained artifact: %s", path)
++		}
++		return nil
++	}); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func hardenedTestDeps(t *testing.T) (*config.SinkConfig, *protocol.SequenceTracker, *state.Writer, *state.SinkState, *sync.Mutex, *protocol.BlocklistMatcher) {
++	t.Helper()
++	cfg := &config.SinkConfig{HardenedLiveCDP: true, LiveCDP: config.LiveCDPRef{Enabled: true}}
++	tracker, err := protocol.NewTrackerFromStore(protocol.NewMemorySequenceStore(nil))
++	if err != nil {
++		t.Fatal(err)
++	}
++	return cfg, tracker, state.NewWriter(filepath.Join(t.TempDir(), "sink-state.json")), &state.SinkState{Role: "sink"}, &sync.Mutex{}, protocol.NewBlocklistMatcher(nil)
++}
++
++func TestHardenedSyncInjectFailureDoesNotAdvanceOrClaimSuccess(t *testing.T) {
++	cfg, tracker, writer, sinkState, mu, matcher := hardenedTestDeps(t)
++	old := liveCDPInject
++	liveCDPInject = func(context.Context, string, []chrome.Cookie) (int, error) {
++		return 0, errors.New("cookie .secret.example SID rejected")
++	}
++	t.Cleanup(func() { liveCDPInject = old })
++	rec := httptest.NewRecorder()
++	handleHardenedLiveCDPSync(rec, httptest.NewRequest("POST", "/sync", nil), cfg,
++		&protocol.SyncEnvelope{SourceHostname: "source", Sequence: 1},
++		[]chrome.Cookie{{HostKey: ".secret.example", Name: "SID", Value: "sensitive"}}, 0, matcher, tracker, writer, sinkState, mu)
++	if rec.Code != 503 || tracker.Last("source") != 0 || sinkState.TotalWrites != 0 {
++		t.Fatalf("failure must be non-2xx with no replay/status advance: code=%d last=%d writes=%d", rec.Code, tracker.Last("source"), sinkState.TotalWrites)
++	}
++	if body := rec.Body.String(); body != "live CDP injection failed\n" {
++		t.Fatalf("response leaked details: %q", body)
++	}
++}
++
++func TestHardenedSyncZeroContextsIsFailure(t *testing.T) {
++	cfg, tracker, writer, sinkState, mu, matcher := hardenedTestDeps(t)
++	old := liveCDPInject
++	liveCDPInject = func(context.Context, string, []chrome.Cookie) (int, error) { return 0, nil }
++	t.Cleanup(func() { liveCDPInject = old })
++	rec := httptest.NewRecorder()
++	handleHardenedLiveCDPSync(rec, httptest.NewRequest("POST", "/sync", nil), cfg,
++		&protocol.SyncEnvelope{SourceHostname: "source", Sequence: 1},
++		[]chrome.Cookie{{HostKey: ".example.com", Name: "session", Value: "sensitive"}}, 0, matcher, tracker, writer, sinkState, mu)
++	if rec.Code != 503 || tracker.Last("source") != 0 || sinkState.TotalWrites != 0 {
++		t.Fatalf("zero contexts must fail without replay/status advance: code=%d last=%d writes=%d", rec.Code, tracker.Last("source"), sinkState.TotalWrites)
++	}
++}
++
++func TestHardenedSyncDurableCommitFailureDoesNotAckOrClaimSuccess(t *testing.T) {
++	cfg, _, writer, sinkState, mu, matcher := hardenedTestDeps(t)
++	store := protocol.NewMemorySequenceStore(nil)
++	store.FailSave = errors.New("simulated durable write failure")
++	tracker, err := protocol.NewTrackerFromStore(store)
++	if err != nil {
++		t.Fatal(err)
++	}
++	old := liveCDPInject
++	liveCDPInject = func(context.Context, string, []chrome.Cookie) (int, error) { return 1, nil }
++	t.Cleanup(func() { liveCDPInject = old })
++	rec := httptest.NewRecorder()
++	handleHardenedLiveCDPSync(rec, httptest.NewRequest("POST", "/sync", nil), cfg,
++		&protocol.SyncEnvelope{SourceHostname: "source", Sequence: 1},
++		[]chrome.Cookie{{HostKey: ".example.com", Name: "session", Value: "sensitive"}}, 0, matcher, tracker, writer, sinkState, mu)
++	if rec.Code != 507 || tracker.Last("source") != 0 || sinkState.TotalWrites != 0 {
++		t.Fatalf("commit failure must fail without replay/status advance: code=%d last=%d writes=%d", rec.Code, tracker.Last("source"), sinkState.TotalWrites)
++	}
++}
++
++func TestHardenedSyncInjectThenDurableCommitThenAck(t *testing.T) {
++	cfg, tracker, writer, sinkState, mu, matcher := hardenedTestDeps(t)
++	old := liveCDPInject
++	liveCDPInject = func(context.Context, string, []chrome.Cookie) (int, error) { return 2, nil }
++	t.Cleanup(func() { liveCDPInject = old })
++	rec := httptest.NewRecorder()
++	handleHardenedLiveCDPSync(rec, httptest.NewRequest("POST", "/sync", nil), cfg,
++		&protocol.SyncEnvelope{SourceHostname: "source", Sequence: 2},
++		[]chrome.Cookie{{HostKey: ".example.com", Name: "session", Value: "sensitive"}}, 0, matcher, tracker, writer, sinkState, mu)
++	if rec.Code != 200 || tracker.Last("source") != 2 || sinkState.TotalWrites != 1 || sinkState.LastWriteMode != "livecdp-hardened" {
++		t.Fatalf("success contract failed: code=%d last=%d state=%+v", rec.Code, tracker.Last("source"), sinkState)
++	}
++}
++
++func TestHardenedSyncRejectsStorageAndSecretsBeforeInjection(t *testing.T) {
++	cfg, tracker, writer, sinkState, mu, matcher := hardenedTestDeps(t)
++	called := false
++	old := liveCDPInject
++	liveCDPInject = func(context.Context, string, []chrome.Cookie) (int, error) { called = true; return 1, nil }
++	t.Cleanup(func() { liveCDPInject = old })
++	rec := httptest.NewRecorder()
++	handleHardenedLiveCDPSync(rec, httptest.NewRequest("POST", "/sync", nil), cfg,
++		&protocol.SyncEnvelope{SourceHostname: "source", Sequence: 3, LocalStorageTarball: []byte("forbidden"), Secrets: map[string]map[string]string{"x": {"TOKEN": "forbidden"}}},
++		[]chrome.Cookie{{HostKey: ".example.com", Name: "session", Value: "sensitive"}}, 0, matcher, tracker, writer, sinkState, mu)
++	if rec.Code != 422 || called || tracker.Last("source") != 0 || sinkState.TotalWrites != 0 || sinkState.TotalRejects != 0 || sinkState.LastError != "" {
++		t.Fatalf("forbidden payload reached a side effect: code=%d called=%v last=%d state=%+v", rec.Code, called, tracker.Last("source"), sinkState)
++	}
++}
+diff --git a/internal/cli/wizard.go b/internal/cli/wizard.go
+index c0119805983d6178f3e8478a15288f9b620f7010..29482f259616a0df6ec0d260e54e3c1147dd0350 100644
+--- a/internal/cli/wizard.go
++++ b/internal/cli/wizard.go
+@@ -5,6 +5,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"io"
+ 	"net"
+ 	"os"
+ 	"os/exec"
+@@ -28,7 +29,7 @@ var (
+ 	wizardListen             string
+ 	wizardLocalName          string
+ 	wizardSinkURL            string
+-	wizardCode               string
++	wizardCodeStdin          bool
+ 	wizardPairURL            string
+ 	wizardRepair             bool
+ 	wizardForce              bool
+@@ -55,14 +56,17 @@ var wizardCmd = &cobra.Command{
+ machine, runnable by an AI agent over SSH or locally, end-to-end.
+ 
+   agentcookie wizard install --as source --peer <sink-hostname>
+-  agentcookie wizard install --as sink   --peer <source-hostname> \
+-                                         --code <pairing-code>    \
+-                                         --pair-url <source-pair-url>
+-
+-The source-side run drops configs, starts a pairing listener, writes the
+-sink-run command into ~/.agentcookie/pairing.json so an agent can SSH
+-to the sink and read it, and on successful pairing installs a LaunchAgent
+-that runs 'agentcookie source --watch' from then on.
++  read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
++  printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie wizard install \
++    --as sink --peer <source-hostname> --pair-url <source-pair-url> \
++    --code-stdin
++  unset AGENTCOOKIE_PAIR_CODE
++
++The source-side run drops configs, starts a pairing listener, writes only
++nonsecret peer/address/status metadata into ~/.agentcookie/pairing.json,
++and displays the one-time code directly on the owner's controlling terminal.
++On successful pairing it installs a LaunchAgent that runs
++'agentcookie source --watch' from then on.
+ 
+ The sink-side run drops configs (with cdp.managed: true by default so no
+ Keychain prompt fires), runs the sink-side handshake against the source's
+@@ -91,10 +95,10 @@ func init() {
+ 
+ 	wizardInstallCmd.Flags().StringVar(&wizardRole, "as", "", "source | sink (required)")
+ 	wizardInstallCmd.Flags().StringVar(&wizardPeer, "peer", "", "the OTHER machine's hostname")
+-	wizardInstallCmd.Flags().StringVar(&wizardListen, "listen", "", "[source] pairing listener bind address (default 0.0.0.0:9998)")
++	wizardInstallCmd.Flags().StringVar(&wizardListen, "listen", "", "[source] pairing listener bind address (default: auto-detected Tailscale 100.x:9998; explicit wildcard binds are refused)")
+ 	wizardInstallCmd.Flags().StringVar(&wizardLocalName, "local-name", "", "hostname this side announces (default os.Hostname)")
+ 	wizardInstallCmd.Flags().StringVar(&wizardSinkURL, "sink-url", "", "[source] override sink URL (default http://<peer>:9999/sync)")
+-	wizardInstallCmd.Flags().StringVar(&wizardCode, "code", "", "[sink] pairing code (from source's wizard output)")
++	wizardInstallCmd.Flags().BoolVar(&wizardCodeStdin, "code-stdin", false, "[sink] read the required pairing code from stdin")
+ 	wizardInstallCmd.Flags().StringVar(&wizardPairURL, "pair-url", "", "[sink] source's pairing URL")
+ 	wizardInstallCmd.Flags().BoolVar(&wizardRepair, "repair", false, "force a fresh pairing handshake even if a key already exists")
+ 	wizardInstallCmd.Flags().BoolVar(&wizardForce, "force", false, "overwrite existing source.yaml / sink.yaml / blocklist.yaml")
+@@ -139,7 +143,7 @@ func runWizardInstall(cmd *cobra.Command, args []string) error {
+ 	case "source":
+ 		installErr = wizardInstallSource(cmd.Context(), binPath, logDir)
+ 	case "sink":
+-		installErr = wizardInstallSink(cmd.Context(), binPath, logDir)
++		installErr = wizardInstallSink(cmd.Context(), binPath, logDir, cmd.InOrStdin())
+ 	}
+ 	if installErr != nil {
+ 		return installErr
+@@ -204,13 +208,16 @@ func wizardInstallSource(ctx context.Context, binPath, logDir string) error {
+ 		} else if err := validateListenAddr(listen); err != nil {
+ 			return fmt.Errorf("--listen %q: %w", listen, err)
+ 		}
+-		// Write a pairing info file so an SSH'ing agent can grab it.
+-		pairingInfo, code, err := beginSourcePairing(ctx, listen, wizardLocalName, binPath, logDir)
++		secretTTY, err := openPairingSecretTTY()
++		if err != nil {
++			return err
++		}
++		defer secretTTY.Close()
++		res, err := beginSourcePairing(ctx, listen, wizardLocalName, os.Stderr, secretTTY, defaultPairingInfoPath())
+ 		if err != nil {
+ 			return fmt.Errorf("pairing: %w", err)
+ 		}
+-		fmt.Fprintln(os.Stderr, pairingInfo)
+-		fmt.Fprintf(os.Stderr, "agentcookie wizard: paired with %q (code was %s)\n", wizardPeer, code)
++		fmt.Fprintf(os.Stderr, "agentcookie wizard: paired with %q (fingerprint %s)\n", wizardPeer, res.Fingerprint)
+ 	}
+ 
+ 	// Step 4: install the daemon unless skipped.
+@@ -240,10 +247,18 @@ func wizardInstallSource(ctx context.Context, binPath, logDir string) error {
+ 	return nil
+ }
+ 
+-func wizardInstallSink(ctx context.Context, binPath, logDir string) error {
+-	if wizardCode == "" || wizardPairURL == "" {
+-		return fmt.Errorf("--code and --pair-url are required when --as sink")
++func wizardInstallSink(ctx context.Context, binPath, logDir string, input io.Reader) error {
++	if wizardPairURL == "" {
++		return fmt.Errorf("--pair-url is required when --as sink")
++	}
++	if !wizardCodeStdin {
++		return fmt.Errorf("--code-stdin is required when --as sink; pairing codes in process arguments are not supported")
+ 	}
++	wizardCode, err := readPairingCode(input)
++	if err != nil {
++		return err
++	}
++	defer func() { wizardCode = "" }()
+ 	if err := os.MkdirAll(common.ConfigDir, 0o755); err != nil {
+ 		return err
+ 	}
+@@ -322,7 +337,7 @@ func wizardInstallSink(ctx context.Context, binPath, logDir string) error {
+ 	if fileExists(keyPath) && !wizardRepair {
+ 		fmt.Fprintf(os.Stderr, "agentcookie wizard: existing paired key for %q found; skipping pairing (use --repair to force)\n", wizardPeer)
+ 	} else {
+-		res, err := pairing.RunSink(ctx, wizardPairURL, pairing.Code(wizardCode), wizardLocalName)
++		res, err := pairing.RunSink(ctx, wizardPairURL, wizardCode, wizardLocalName)
+ 		if err != nil {
+ 			return fmt.Errorf("sink pairing: %w", err)
+ 		}
+@@ -507,35 +522,24 @@ func runWizardUninstall(cmd *cobra.Command, args []string) error {
+ 	return nil
+ }
+ 
+-// beginSourcePairing starts a source-side pairing listener and waits for the
+-// sink to connect. Returns a human-readable instruction block (which is also
+-// the content of ~/.agentcookie/pairing.json) plus the code, blocking until
+-// pairing completes or times out.
+-func beginSourcePairing(ctx context.Context, listen, localName, binPath, logDir string) (string, pairing.Code, error) {
+-	pairingInfoPath := filepath.Join(filepath.Dir(common.ConfigDir), ".agentcookie", "pairing.json")
+-	_ = pairingInfoPath // computed for symmetry; we write under ~/.agentcookie/
++// beginSourcePairing writes only nonsecret routing/status metadata, delivers
++// the one-time code directly to secretWriter, and waits for the sink. The code
++// never enters pairing.json, status output, logs, or a returned value.
++func beginSourcePairing(ctx context.Context, listen, localName string, statusWriter, secretWriter io.Writer, infoPath string) (*pairing.HandshakeResult, error) {
++	return beginSourcePairingWithRunner(ctx, listen, localName, statusWriter, secretWriter, infoPath, pairing.RunSource)
++}
+ 
+-	home, _ := os.UserHomeDir()
+-	infoPath := filepath.Join(home, ".agentcookie", "pairing.json")
+-	if err := os.MkdirAll(filepath.Dir(infoPath), 0o700); err != nil {
+-		return "", "", err
+-	}
++type sourcePairingRunner func(context.Context, string, string, io.Writer, io.Writer) (*pairing.HandshakeResult, error)
+ 
+-	// RunSource generates the code internally and prints it. We wrap so we can
+-	// also write it to a file the SSH'ing agent can grab.
+-	codeCh := make(chan pairing.Code, 1)
+-	infoWriter := &pairingInfoWriter{
+-		listen:      listen,
+-		peer:        localName,
+-		path:        infoPath,
+-		notify:      codeCh,
+-		onPlainLine: os.Stderr,
++func beginSourcePairingWithRunner(ctx context.Context, listen, localName string, statusWriter, secretWriter io.Writer, infoPath string, runner sourcePairingRunner) (*pairing.HandshakeResult, error) {
++	if err := writePairingMetadata(infoPath, listen, localName); err != nil {
++		return nil, err
+ 	}
++	defer os.Remove(infoPath)
+ 
+-	res, code, err := pairing.RunSource(ctx, listen, localName, infoWriter)
++	res, err := runner(ctx, listen, localName, statusWriter, secretWriter)
+ 	if err != nil {
+-		_ = os.Remove(infoPath)
+-		return "", code, err
++		return nil, err
+ 	}
+ 
+ 	// v0.12.0-beta.2: file the key under the operator-supplied peer
+@@ -557,15 +561,34 @@ func beginSourcePairing(ctx context.Context, listen, localName, binPath, logDir
+ 		ProtocolVer: pairing.ProtocolVersion,
+ 	}
+ 	if wizardPeer != res.RemotePeer {
+-		fmt.Fprintf(os.Stderr, "agentcookie wizard: sink announced itself as %q; storing key under operator-supplied --peer %q\n", res.RemotePeer, wizardPeer)
++		fmt.Fprintf(statusWriter, "agentcookie wizard: sink announced itself as %q; storing key under operator-supplied --peer %q\n", res.RemotePeer, wizardPeer)
+ 	}
+ 	if err := keystore.Save(common.ConfigDir, pk); err != nil {
+-		return "", code, fmt.Errorf("save key: %w", err)
++		return nil, fmt.Errorf("save key: %w", err)
+ 	}
+-	// Clean up the pairing info file now that we're paired.
+-	_ = os.Remove(infoPath)
++	return res, nil
++}
+ 
+-	return fmt.Sprintf("agentcookie wizard: paired (code %s, fingerprint %s)", code, res.Fingerprint), code, nil
++func defaultPairingInfoPath() string {
++	home, _ := os.UserHomeDir()
++	return filepath.Join(home, ".agentcookie", "pairing.json")
++}
++
++func writePairingMetadata(infoPath, listen, localName string) error {
++	if err := os.MkdirAll(filepath.Dir(infoPath), 0o700); err != nil {
++		return err
++	}
++	info := map[string]string{
++		"peer":     localName,
++		"pair_url": fmt.Sprintf("http://%s/pair", listen),
++		"sink_run": fmt.Sprintf("printf '%%s\\n' \"$AGENTCOOKIE_PAIR_CODE\" | agentcookie wizard install --as sink --peer %s --pair-url http://%s/pair --code-stdin", localName, listen),
++		"status":   "waiting_for_owner_attended_pairing",
++	}
++	body, err := json.MarshalIndent(info, "", "  ")
++	if err != nil {
++		return fmt.Errorf("encode nonsecret pairing metadata: %w", err)
++	}
++	return os.WriteFile(infoPath, body, 0o600)
+ }
+ 
+ // guardConfigPeerMismatch refuses to leave a stale peer.hostname in
+@@ -604,53 +627,6 @@ func guardConfigPeerMismatch(role, path, wantPeer string) error {
+ 	return fmt.Errorf("existing %s.yaml has peer.hostname %q but --peer is %q; pass --force to overwrite (otherwise pair handshake will save a key the running daemon cannot find)", role, existing, wantPeer)
+ }
+ 
+-// pairingInfoWriter intercepts the source-side pairing announcement and writes
+-// a JSON sibling file an SSH'ing agent can grab.
+-type pairingInfoWriter struct {
+-	listen      string
+-	peer        string
+-	path        string
+-	notify      chan<- pairing.Code
+-	onPlainLine *os.File
+-	written     bool
+-}
+-
+-func (p *pairingInfoWriter) Write(data []byte) (int, error) {
+-	if !p.written && strings.Contains(string(data), "pairing code:") {
+-		code := extractCode(string(data))
+-		if code != "" {
+-			info := map[string]string{
+-				"code":     code,
+-				"peer":     p.peer,
+-				"pair_url": fmt.Sprintf("http://%s/pair", p.listen),
+-				"sink_run": fmt.Sprintf("agentcookie wizard install --as sink --peer %s --code %s --pair-url http://%s/pair", p.peer, code, p.listen),
+-			}
+-			body, _ := json.MarshalIndent(info, "", "  ")
+-			_ = os.WriteFile(p.path, body, 0o600)
+-			p.written = true
+-			select {
+-			case p.notify <- pairing.Code(code):
+-			default:
+-			}
+-		}
+-	}
+-	return p.onPlainLine.Write(data)
+-}
+-
+-func extractCode(text string) string {
+-	const tag = "pairing code:"
+-	_, after, ok := strings.Cut(text, tag)
+-	if !ok {
+-		return ""
+-	}
+-	tail := after
+-	fields := strings.Fields(tail)
+-	if len(fields) == 0 {
+-		return ""
+-	}
+-	return fields[0]
+-}
+-
+ func writeYAMLIfMissing(path, content string, force bool) error {
+ 	if !force && fileExists(path) {
+ 		return nil
+diff --git a/internal/config/config.go b/internal/config/config.go
+index 8ec9124ba5400717e57dd093bda7838fbce3f250..a6d06fbc7499ab74779d22b5280a56f213fdbd57 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -5,9 +5,12 @@ package config
+ 
+ import (
+ 	"fmt"
++	"net"
++	"net/url"
+ 	"os"
+ 	"path/filepath"
+ 	"sort"
++	"strconv"
+ 	"strings"
+ 
+ 	"gopkg.in/yaml.v3"
+@@ -59,6 +62,10 @@ type SinkConfig struct {
+ 	LiveCDP          LiveCDPRef  `yaml:"live_cdp,omitempty" json:"live_cdp,omitempty"`
+ 	Cmux             CmuxRef     `yaml:"cmux,omitempty" json:"cmux,omitempty"`
+ 	Delivery         string      `yaml:"delivery,omitempty" json:"delivery,omitempty"`
++	// HardenedLiveCDP turns the Linux sink into a cookie-only endpoint.
++	// Every disk, adapter, and secrets delivery surface is prohibited.
++	HardenedLiveCDP bool   `yaml:"hardened_live_cdp,omitempty" json:"hardened_live_cdp,omitempty"`
++	ReplayStatePath string `yaml:"replay_state_path,omitempty" json:"replay_state_path,omitempty"`
+ }
+ 
+ // CmuxRef configures the cmux cookie-delivery surface (a fourth surface
+@@ -263,9 +270,75 @@ func LoadSink(dir string) (*SinkConfig, error) {
+ 	if IsLinux() {
+ 		applyLinuxSinkDefaults(&cfg)
+ 	}
++	if cfg.LiveCDP.Enabled {
++		if err := validateLiveCDPEndpoint(cfg.LiveCDP.Endpoint); err != nil {
++			return nil, fmt.Errorf("%s: live_cdp.endpoint: %w", path, err)
++		}
++	}
++	if cfg.HardenedLiveCDP {
++		if !IsLinux() {
++			return nil, fmt.Errorf("%s: hardened_live_cdp is Linux-only", path)
++		}
++		if !cfg.SkipChromeSQLite || !cfg.LiveCDP.Enabled || cfg.CDP.Enabled || cfg.Cmux.Enabled {
++			return nil, fmt.Errorf("%s: hardened_live_cdp requires skip_chrome_sqlite=true and live_cdp.enabled=true, with cdp and cmux disabled", path)
++		}
++		if cfg.ReplayStatePath == "" || !filepath.IsAbs(cfg.ReplayStatePath) {
++			return nil, fmt.Errorf("%s: hardened_live_cdp requires an absolute replay_state_path", path)
++		}
++		cfg.ReplayStatePath = filepath.Clean(cfg.ReplayStatePath)
++	}
+ 	return &cfg, nil
+ }
+ 
++// validateLiveCDPEndpoint constrains CDP attachment to an explicit local TCP
++// endpoint. An empty value selects the built-in http://127.0.0.1:9223 default;
++// every configured value must be a canonical loopback-only HTTP origin.
++func validateLiveCDPEndpoint(endpoint string) error {
++	if endpoint == "" {
++		return nil
++	}
++	if strings.ContainsAny(endpoint, "?#") {
++		return fmt.Errorf("query strings and fragments are prohibited")
++	}
++	if !strings.HasPrefix(endpoint, "http://") {
++		return fmt.Errorf("scheme must be exactly http")
++	}
++	u, err := url.Parse(endpoint)
++	if err != nil {
++		return fmt.Errorf("parse endpoint: %w", err)
++	}
++	if u.Scheme != "http" || u.Opaque != "" {
++		return fmt.Errorf("scheme must be exactly http")
++	}
++	if u.User != nil {
++		return fmt.Errorf("userinfo is prohibited")
++	}
++	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
++		return fmt.Errorf("query strings and fragments are prohibited")
++	}
++	if u.Path != "" && u.Path != "/" {
++		return fmt.Errorf("path must be empty or /")
++	}
++	if u.RawPath != "" {
++		return fmt.Errorf("encoded paths are prohibited")
++	}
++	host, portText, err := net.SplitHostPort(u.Host)
++	if err != nil || portText == "" {
++		return fmt.Errorf("an explicit host and port are required")
++	}
++	if host != "127.0.0.1" && host != "::1" {
++		return fmt.Errorf("host must be exactly 127.0.0.1 or [::1]")
++	}
++	port, err := strconv.Atoi(portText)
++	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != portText {
++		return fmt.Errorf("port must be a canonical integer from 1 through 65535")
++	}
++	if u.Host != net.JoinHostPort(host, portText) {
++		return fmt.Errorf("host and port must use canonical URL syntax")
++	}
++	return nil
++}
++
+ // applyLinuxSinkDefaults sets Linux-appropriate sink defaults. Linux cannot
+ // read Chrome Safe Storage via macOS Keychain, so it skips Chrome SQLite
+ // writes by default. The primary injection path is live CDP attach to a
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+index ed2a820c99bf7c52be1ab04726edd976f254c081..531a447e926c52871e761f06bc7fc603c7f54725 100644
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -175,6 +175,70 @@ security:
+ 	}
+ }
+ 
++func TestValidateLiveCDPEndpointIsLoopbackOnly(t *testing.T) {
++	valid := []string{
++		"", // Secure built-in default: http://127.0.0.1:9223.
++		"http://127.0.0.1:9223",
++		"http://127.0.0.1:9223/",
++		"http://[::1]:9223",
++		"http://[::1]:9223/",
++	}
++	for _, endpoint := range valid {
++		t.Run("valid_"+strings.ReplaceAll(endpoint, "/", "_"), func(t *testing.T) {
++			if err := validateLiveCDPEndpoint(endpoint); err != nil {
++				t.Fatalf("validateLiveCDPEndpoint(%q): %v", endpoint, err)
++			}
++		})
++	}
++
++	invalid := []string{
++		"https://127.0.0.1:9223",
++		"HTTP://127.0.0.1:9223",
++		"http://localhost:9223",
++		"http://127.0.0.2:9223",
++		"http://0.0.0.0:9223",
++		"http://[::]:9223",
++		"http://[::ffff:127.0.0.1]:9223",
++		"http://127.0.0.1",
++		"http://[::1]",
++		"http://127.0.0.1:0",
++		"http://127.0.0.1:65536",
++		"http://127.0.0.1:09223",
++		"http://user@127.0.0.1:9223",
++		"http://user:pass@127.0.0.1:9223",
++		"http://127.0.0.1:9223/json",
++		"http://127.0.0.1:9223/%2f",
++		"http://127.0.0.1:9223?target=remote",
++		"http://127.0.0.1:9223?",
++		"http://127.0.0.1:9223#fragment",
++		"http://127.0.0.1:9223#",
++	}
++	for _, endpoint := range invalid {
++		t.Run("invalid_"+strings.ReplaceAll(endpoint, "/", "_"), func(t *testing.T) {
++			if err := validateLiveCDPEndpoint(endpoint); err == nil {
++				t.Fatalf("validateLiveCDPEndpoint(%q) succeeded", endpoint)
++			}
++		})
++	}
++}
++
++func TestLoadSinkRejectsUnsafeLiveCDPEndpoint(t *testing.T) {
++	dir := t.TempDir()
++	writeFile(t, dir, "sink.yaml", `
++listen:
++  addr: 100.80.229.80:9999
++live_cdp:
++  enabled: true
++  endpoint: http://169.254.169.254:80/latest/meta-data
++security:
++  shared_secret: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
++`)
++	_, err := LoadSink(dir)
++	if err == nil || !strings.Contains(err.Error(), "live_cdp.endpoint") {
++		t.Fatalf("LoadSink unsafe endpoint error = %v", err)
++	}
++}
++
+ // TestLoadSinkSkipChromeSQLite covers the v0.12.0-beta.3 headless mode.
+ // Round-trips skip_chrome_sqlite + cdp.enabled through YAML and checks
+ // that absence defaults to legacy behavior (R6 regression guard).
+diff --git a/internal/livecdp/attach.go b/internal/livecdp/attach.go
+index ad3b6eee2da724df4887d2cd8c607840b1d33c4f..da4bd500456d1d661f63deca83862f7de05a444b 100644
+--- a/internal/livecdp/attach.go
++++ b/internal/livecdp/attach.go
+@@ -3,11 +3,13 @@ package livecdp
+ import (
+ 	"context"
+ 	"fmt"
++	"net/url"
+ 	"strings"
+ 	"sync"
+ 	"time"
+ 
+ 	"github.com/chromedp/cdproto/cdp"
++	"github.com/chromedp/cdproto/network"
+ 	"github.com/chromedp/cdproto/storage"
+ 	"github.com/chromedp/cdproto/target"
+ 	"github.com/chromedp/chromedp"
+@@ -212,6 +214,9 @@ func explicitContextSet(browserCtx context.Context) (map[cdp.BrowserContextID]bo
+ // a tab the agent is driving.
+ func injectIntoContext(browserCtx context.Context, ctxID cdp.BrowserContextID, useID bool, cookies []chrome.Cookie) error {
+ 	params := BuildCookieParams(cookies)
++	if len(params) != len(cookies) {
++		return fmt.Errorf("cookie parameter shaping rejected an input cookie")
++	}
+ 	if len(params) == 0 {
+ 		return nil
+ 	}
+@@ -224,10 +229,45 @@ func injectIntoContext(browserCtx context.Context, ctxID cdp.BrowserContextID, u
+ 		if err := sc.Do(bctx); err != nil {
+ 			return fmt.Errorf("Storage.setCookies (%d cookies, ctx=%q useID=%v): %w", len(params), ctxID, useID, err)
+ 		}
++		gc := storage.GetCookies()
++		if useID {
++			gc = gc.WithBrowserContextID(ctxID)
++		}
++		stored, err := gc.Do(bctx)
++		if err != nil {
++			return fmt.Errorf("Storage.getCookies readback failed")
++		}
++		for _, expected := range params {
++			found := false
++			for _, got := range stored {
++				if got.Name == expected.Name && got.Value == expected.Value && got.Path == expected.Path && normalizeCookieDomain(got.Domain) == expectedCookieHost(expected) && got.Secure == expected.Secure && got.HTTPOnly == expected.HTTPOnly && got.SameSite == expected.SameSite {
++					found = true
++					break
++				}
++			}
++			if !found {
++				return fmt.Errorf("Storage.getCookies did not verify every injected cookie")
++			}
++		}
+ 		return nil
+ 	}))
+ }
+ 
++func expectedCookieHost(cookie *network.CookieParam) string {
++	if cookie.Domain != "" {
++		return normalizeCookieDomain(cookie.Domain)
++	}
++	parsed, err := url.Parse(cookie.URL)
++	if err != nil {
++		return ""
++	}
++	return normalizeCookieDomain(parsed.Hostname())
++}
++
++func normalizeCookieDomain(domain string) string {
++	return strings.ToLower(strings.TrimPrefix(domain, "."))
++}
++
+ // shouldInjectTarget reports whether a target should receive cookies: real
+ // page targets only, excluding Chrome-internal and extension surfaces and
+ // prerender subframes. about:blank pages qualify -- they belong to a real
+diff --git a/internal/livecdp/readback_test.go b/internal/livecdp/readback_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3caf68df7533d72e374450aee34df3e36ca7a14f
+--- /dev/null
++++ b/internal/livecdp/readback_test.go
+@@ -0,0 +1,22 @@
++package livecdp
++
++import (
++	"testing"
++
++	"github.com/chromedp/cdproto/network"
++)
++
++func TestExpectedCookieHost(t *testing.T) {
++	tests := []struct {
++		param *network.CookieParam
++		want  string
++	}{
++		{param: &network.CookieParam{Domain: ".Example.COM"}, want: "example.com"},
++		{param: &network.CookieParam{URL: "https://app.Example.COM/path"}, want: "app.example.com"},
++	}
++	for _, tc := range tests {
++		if got := expectedCookieHost(tc.param); got != tc.want {
++			t.Fatalf("expected %q, got %q", tc.want, got)
++		}
++	}
++}
+diff --git a/internal/pairing/pairing.go b/internal/pairing/pairing.go
+index f363750b92d6f0e6eb839b6df9d9fddbe8b424a2..45dc38931eae7a78fbfff02d54351de18ed783ca 100644
+--- a/internal/pairing/pairing.go
++++ b/internal/pairing/pairing.go
+@@ -1,9 +1,9 @@
+ // Package pairing implements the source-sink pairing handshake.
+ //
+ // The flow: source generates an X25519 ephemeral keypair plus a short
+-// human-typable pairing code, starts an HTTP listener, and prints the code
+-// to the user. The user runs the sink-side command with that code on the
+-// other machine. Sink generates its own X25519 keypair, POSTs its public
++// human-typable pairing code, starts an HTTP listener, and writes the code
++// only to an owner-attended controlling terminal. The owner enters it through
++// hidden stdin on the other machine. Sink generates its own X25519 keypair, POSTs its public
+ // key (and the pairing code) to the source's pairing endpoint. Source
+ // verifies the code, replies with its public key. Both sides compute the
+ // X25519 shared secret and run HKDF-SHA256 over (shared_secret, salt=code,
+@@ -128,17 +128,31 @@ func DeriveKey(sharedSecret []byte, code Code) ([]byte, string, error) {
+ 	return key, fp, nil
+ }
+ 
+-// RunSource starts the source-side listener, prints the code, waits for the
+-// sink to connect. Returns the derived key + peer info on success.
+-func RunSource(ctx context.Context, listenAddr, localHostname string, w io.Writer) (*HandshakeResult, Code, error) {
+-	curve := ecdh.X25519()
+-	priv, err := curve.GenerateKey(rand.Reader)
++// RunSource starts the source-side listener and waits for the sink to connect.
++// The raw one-time code is written only to secretWriter, which callers bind to
++// an owner-attended controlling terminal. statusWriter is safe to redirect to
++// logs and never receives the code.
++func RunSource(ctx context.Context, listenAddr, localHostname string, statusWriter, secretWriter io.Writer) (*HandshakeResult, error) {
++	code, err := NewCode()
+ 	if err != nil {
+-		return nil, "", fmt.Errorf("gen ephemeral key: %w", err)
++		return nil, err
+ 	}
+-	code, err := NewCode()
++	return runSourceWithCode(ctx, listenAddr, localHostname, code, statusWriter, secretWriter)
++}
++
++func runSourceWithCode(ctx context.Context, listenAddr, localHostname string, code Code, statusWriter, secretWriter io.Writer) (*HandshakeResult, error) {
++	if statusWriter == nil {
++		statusWriter = io.Discard
++	}
++	if secretWriter == nil {
++		return nil, fmt.Errorf("owner-attended pairing-code writer is required")
++	}
++	defer func() { code = "" }()
++
++	curve := ecdh.X25519()
++	priv, err := curve.GenerateKey(rand.Reader)
+ 	if err != nil {
+-		return nil, "", err
++		return nil, fmt.Errorf("gen ephemeral key: %w", err)
+ 	}
+ 
+ 	resultCh := make(chan *HandshakeResult, 1)
+@@ -210,25 +224,33 @@ func RunSource(ctx context.Context, listenAddr, localHostname string, w io.Write
+ 	srv := httpserver.Configure(&http.Server{Addr: listenAddr, Handler: mux}, httpserver.Pair)
+ 	ln, err := net.Listen("tcp", listenAddr)
+ 	if err != nil {
+-		return nil, "", fmt.Errorf("listen %s: %w", listenAddr, err)
++		return nil, fmt.Errorf("listen %s: %w", listenAddr, err)
+ 	}
+ 	defer ln.Close()
+ 
++	if err := writeOwnerSecret(secretWriter, code); err != nil {
++		_ = srv.Close()
++		_ = ln.Close()
++		return nil, err
++	}
++
+ 	go func() {
+ 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+ 			errCh <- fmt.Errorf("pair server: %w", err)
+ 		}
+ 	}()
+ 
+-	fmt.Fprintln(w, "agentcookie pair (source side)")
+-	fmt.Fprintln(w, "  pairing code:", code)
+-	fmt.Fprintln(w, "  source hostname:", localHostname)
+-	fmt.Fprintln(w, "  listening on:", listenAddr)
+-	fmt.Fprintln(w, "")
+-	fmt.Fprintln(w, "  Run this on the sink machine within", PairTimeout)
+-	fmt.Fprintf(w, "    agentcookie pair --as sink --peer %s --pair-url http://%s/pair --code %s\n", localHostname, listenAddr, code)
+-	fmt.Fprintln(w, "")
+-	fmt.Fprintln(w, "  Waiting for sink...")
++	fmt.Fprintln(statusWriter, "agentcookie pair (source side)")
++	fmt.Fprintln(statusWriter, "  pairing code: delivered directly to the controlling terminal")
++	fmt.Fprintln(statusWriter, "  source hostname:", localHostname)
++	fmt.Fprintln(statusWriter, "  listening on:", listenAddr)
++	fmt.Fprintln(statusWriter, "")
++	fmt.Fprintln(statusWriter, "  Run this on the sink machine within", PairTimeout)
++	fmt.Fprintln(statusWriter, "    read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\\n'")
++	fmt.Fprintf(statusWriter, "    printf '%%s\\n' \"$AGENTCOOKIE_PAIR_CODE\" | agentcookie pair --as sink --peer %s --pair-url http://%s/pair --code-stdin\n", localHostname, listenAddr)
++	fmt.Fprintln(statusWriter, "    unset AGENTCOOKIE_PAIR_CODE")
++	fmt.Fprintln(statusWriter, "")
++	fmt.Fprintln(statusWriter, "  Waiting for sink...")
+ 
+ 	pairCtx, cancel := context.WithTimeout(ctx, PairTimeout)
+ 	defer cancel()
+@@ -236,21 +258,40 @@ func RunSource(ctx context.Context, listenAddr, localHostname string, w io.Write
+ 	case <-pairCtx.Done():
+ 		_ = srv.Shutdown(context.Background())
+ 		if errors.Is(pairCtx.Err(), context.DeadlineExceeded) {
+-			return nil, code, fmt.Errorf("pairing timed out after %s without a sink connection", PairTimeout)
++			return nil, fmt.Errorf("pairing timed out after %s without a sink connection", PairTimeout)
+ 		}
+-		return nil, code, pairCtx.Err()
++		return nil, pairCtx.Err()
+ 	case err := <-errCh:
+-		return nil, code, err
++		return nil, err
+ 	case res := <-resultCh:
+ 		_ = srv.Shutdown(context.Background())
+-		return res, code, nil
++		return res, nil
++	}
++}
++
++func writeOwnerSecret(secretWriter io.Writer, code Code) error {
++	const prefix = "agentcookie one-time pairing code: "
++	announcement := make([]byte, 0, len(prefix)+len(code)+1)
++	announcement = append(announcement, prefix...)
++	announcement = append(announcement, code...)
++	announcement = append(announcement, '\n')
++	expected := len(announcement)
++	defer clear(announcement)
++	written, err := secretWriter.Write(announcement)
++	if err != nil {
++		return fmt.Errorf("deliver pairing code to controlling terminal: %w", err)
++	}
++	if written != expected {
++		return fmt.Errorf("deliver pairing code to controlling terminal: %w", io.ErrShortWrite)
+ 	}
++	return nil
+ }
+ 
+ // RunSink performs the sink-side handshake: connect to source's pairing URL,
+ // send our public key + the code, receive source's public key, derive the
+ // shared key.
+ func RunSink(ctx context.Context, sourcePairURL string, providedCode Code, localHostname string) (*HandshakeResult, error) {
++	defer func() { providedCode = "" }()
+ 	curve := ecdh.X25519()
+ 	priv, err := curve.GenerateKey(rand.Reader)
+ 	if err != nil {
+diff --git a/internal/pairing/pairing_test.go b/internal/pairing/pairing_test.go
+index d7a9bd24fca66f1677507b713f990cde0ade6c7b..6f1278790c1b93d7209fca550dda1017d74cc215 100644
+--- a/internal/pairing/pairing_test.go
++++ b/internal/pairing/pairing_test.go
+@@ -5,6 +5,8 @@ import (
+ 	"context"
+ 	"crypto/ecdh"
+ 	"crypto/rand"
++	"errors"
++	"fmt"
+ 	"io"
+ 	"net"
+ 	"strings"
+@@ -100,12 +102,116 @@ func TestRunSourceTimesOut(t *testing.T) {
+ 	addr := freeAddr(t)
+ 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+ 	defer cancel()
+-	_, _, err := RunSource(ctx, addr, "laptop.test", io.Discard)
++	_, err := RunSource(ctx, addr, "laptop.test", io.Discard, io.Discard)
+ 	if err == nil {
+ 		t.Fatal("expected timeout error, got nil")
+ 	}
+ }
+ 
++func TestRunSourcePrintsStdinOnlyPairingCommand(t *testing.T) {
++	addr := freeAddr(t)
++	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
++	defer cancel()
++	var output bytes.Buffer
++	var secretOutput bytes.Buffer
++	_, _ = RunSource(ctx, addr, "laptop.test", &output, &secretOutput)
++	text := output.String()
++	if strings.Contains(text, " --code ") {
++		t.Fatalf("pairing output put the one-time code in argv: %s", text)
++	}
++	if !strings.Contains(text, "--code-stdin") || !strings.Contains(text, "read -rsp") {
++		t.Fatalf("pairing output omitted the stdin-only command: %s", text)
++	}
++	secretFields := strings.Fields(secretOutput.String())
++	if len(secretFields) == 0 {
++		t.Fatal("owner-attended secret writer did not receive the pairing code")
++	}
++	code := secretFields[len(secretFields)-1]
++	if strings.Contains(text, code) {
++		t.Fatal("status output leaked the one-time code")
++	}
++}
++
++func TestRunSourceSentinelAppearsOnlyOnOwnerSecretWriter(t *testing.T) {
++	const sentinel = "SENT-INEL-CODE"
++	addr := freeAddr(t)
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++
++	var statusOutput bytes.Buffer
++	var secretOutput bytes.Buffer
++	type sourceResult struct {
++		result *HandshakeResult
++		err    error
++	}
++	resultCh := make(chan sourceResult, 1)
++	go func() {
++		result, err := runSourceWithCode(ctx, addr, "laptop.test", Code(sentinel), &statusOutput, &secretOutput)
++		resultCh <- sourceResult{result: result, err: err}
++	}()
++	waitForListen(t, addr)
++
++	sinkResult, err := RunSink(ctx, "http://"+addr+"/pair", Code(sentinel), "sink.test")
++	if err != nil {
++		t.Fatalf("sink pairing: %v", err)
++	}
++	source := <-resultCh
++	if source.err != nil {
++		t.Fatalf("source pairing: %v", source.err)
++	}
++	if !strings.Contains(secretOutput.String(), sentinel) {
++		t.Fatal("sentinel was not delivered to the owner-attended secret writer")
++	}
++	for label, candidate := range map[string]string{
++		"status":        statusOutput.String(),
++		"source result": fmt.Sprintf("%+v", source.result),
++		"sink result":   fmt.Sprintf("%+v", sinkResult),
++	} {
++		if strings.Contains(candidate, sentinel) {
++			t.Fatalf("%s leaked sentinel pairing code", label)
++		}
++	}
++}
++
++type secretWriterFunc func([]byte) (int, error)
++
++func (write secretWriterFunc) Write(data []byte) (int, error) {
++	return write(data)
++}
++
++func TestRunSourceSecretWriteFailureClosesListenerWithoutLeak(t *testing.T) {
++	const sentinel = "SENT-INEL-CODE"
++	tests := map[string]io.Writer{
++		"error": secretWriterFunc(func([]byte) (int, error) {
++			return 0, errors.New("injected terminal write failure")
++		}),
++		"short write": secretWriterFunc(func(data []byte) (int, error) {
++			return len(data) - 1, nil
++		}),
++	}
++	for name, secretWriter := range tests {
++		t.Run(name, func(t *testing.T) {
++			addr := freeAddr(t)
++			var statusOutput bytes.Buffer
++			result, err := runSourceWithCode(context.Background(), addr, "source.test", Code(sentinel), &statusOutput, secretWriter)
++			if err == nil || result != nil {
++				t.Fatalf("secret write failure did not fail closed: result=%v err=%v", result != nil, err)
++			}
++			if strings.Contains(err.Error(), sentinel) || strings.Contains(statusOutput.String(), sentinel) {
++				t.Fatal("secret write failure leaked the pairing code")
++			}
++			if statusOutput.Len() != 0 {
++				t.Fatal("status output was emitted after secret delivery failed")
++			}
++			conn, dialErr := net.DialTimeout("tcp", addr, 100*time.Millisecond)
++			if dialErr == nil {
++				conn.Close()
++				t.Fatal("pair listener remained reachable after secret delivery failed")
++			}
++		})
++	}
++}
++
+ // TestRunSourceRejectsBadCode exercises the source's auth path: spin up the
+ // listener, post a request with the wrong code, expect 401 and no derived key.
+ func TestRunSourceRejectsBadCode(t *testing.T) {
+@@ -118,7 +224,7 @@ func TestRunSourceRejectsBadCode(t *testing.T) {
+ 		// Source-side error not checked: we cancel the ctx below, which
+ 		// returns context.Canceled. The signal we care about is that the
+ 		// sink call returns the right rejection.
+-		_, _, _ = RunSource(ctx, addr, "laptop.test", io.Discard)
++		_, _ = RunSource(ctx, addr, "laptop.test", io.Discard, io.Discard)
+ 	})
+ 
+ 	waitForListen(t, addr)
+diff --git a/internal/protocol/sequence.go b/internal/protocol/sequence.go
+index 3aa88bf6e830993ed6149c8f62b53c9b9e724d01..77602631d9abd68c915fd6ca8dba0a272b8858b7 100644
+--- a/internal/protocol/sequence.go
++++ b/internal/protocol/sequence.go
+@@ -19,6 +19,16 @@ type SequenceTracker struct {
+ 	store SequenceStore
+ }
+ 
++// SequenceReservation serializes acceptance for one envelope while its
++// external side effect is performed. The caller must Commit only after the
++// side effect succeeds, or Abort on every failure path.
++type SequenceReservation struct {
++	tracker *SequenceTracker
++	source  string
++	seq     int64
++	active  bool
++}
++
+ // NewSequenceTracker returns a fresh tracker with no persistence. Kept
+ // for tests and for callers that genuinely want in-memory state. Sink
+ // code should use NewTrackerFromStore so state survives restart.
+@@ -55,26 +65,63 @@ func NewTrackerFromStore(store SequenceStore) (*SequenceTracker, error) {
+ // the in-memory update is rolled back and Accept returns false to
+ // avoid acknowledging a write that did not survive a restart.
+ func (t *SequenceTracker) Accept(source string, seq int64) bool {
+-	t.mu.Lock()
+-	defer t.mu.Unlock()
+-	prev, hadPrev := t.seen[source]
+-	if hadPrev && seq <= prev {
++	reservation, ok := t.Reserve(source, seq)
++	if !ok {
+ 		return false
+ 	}
+-	t.seen[source] = seq
++	return reservation.Commit() == nil
++}
++
++// Reserve validates seq without advancing durable or in-memory high-water
++// state. It retains the tracker lock until Commit or Abort so concurrent
++// requests cannot both perform an irreversible injection for the same
++// sequence window.
++func (t *SequenceTracker) Reserve(source string, seq int64) (*SequenceReservation, bool) {
++	t.mu.Lock()
++	if source == "" || seq <= 0 {
++		t.mu.Unlock()
++		return nil, false
++	}
++	if prev, ok := t.seen[source]; ok && seq <= prev {
++		t.mu.Unlock()
++		return nil, false
++	}
++	return &SequenceReservation{tracker: t, source: source, seq: seq, active: true}, true
++}
++
++// Commit durably advances the replay high-water mark and releases the
++// reservation. A persistence failure restores the in-memory value.
++func (r *SequenceReservation) Commit() error {
++	if r == nil || !r.active {
++		return fmt.Errorf("inactive sequence reservation")
++	}
++	t := r.tracker
++	prev, hadPrev := t.seen[r.source]
++	t.seen[r.source] = r.seq
+ 	if t.store != nil {
+ 		if err := t.store.Save(t.seen); err != nil {
+-			// Roll back the in-memory update so the persistent and
+-			// in-memory state stay consistent across restarts.
+ 			if hadPrev {
+-				t.seen[source] = prev
++				t.seen[r.source] = prev
+ 			} else {
+-				delete(t.seen, source)
++				delete(t.seen, r.source)
+ 			}
+-			return false
++			r.active = false
++			t.mu.Unlock()
++			return err
+ 		}
+ 	}
+-	return true
++	r.active = false
++	t.mu.Unlock()
++	return nil
++}
++
++// Abort releases a reservation without changing replay state.
++func (r *SequenceReservation) Abort() {
++	if r == nil || !r.active {
++		return
++	}
++	r.active = false
++	r.tracker.mu.Unlock()
+ }
+ 
+ // Last returns the highest sequence seen for source, or 0 if none.
+diff --git a/internal/protocol/sequence_file_security_other.go b/internal/protocol/sequence_file_security_other.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ade000f13695b7877a7dcf78e7fa4b2dbd98ba0
+--- /dev/null
++++ b/internal/protocol/sequence_file_security_other.go
+@@ -0,0 +1,13 @@
++//go:build !darwin && !linux
++
++package protocol
++
++import "fmt"
++
++func ensurePrivateReplayParent(string) error {
++	return fmt.Errorf("required replay state is supported only on Darwin and Linux")
++}
++
++func readPrivateReplayFile(string) ([]byte, error) {
++	return nil, fmt.Errorf("required replay state is supported only on Darwin and Linux")
++}
+diff --git a/internal/protocol/sequence_file_security_unix.go b/internal/protocol/sequence_file_security_unix.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1775288ac0ba8eb4205a2c137f4ddecd52ee0fb8
+--- /dev/null
++++ b/internal/protocol/sequence_file_security_unix.go
+@@ -0,0 +1,91 @@
++//go:build darwin || linux
++
++package protocol
++
++import (
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"syscall"
++)
++
++func ensurePrivateReplayParent(dir string) error {
++	if err := os.MkdirAll(dir, 0o700); err != nil {
++		return fmt.Errorf("ensure replay state dir %s: %w", dir, err)
++	}
++	return validatePrivateReplayParent(dir)
++}
++
++func validatePrivateReplayParent(dir string) error {
++	info, err := os.Lstat(dir)
++	if err != nil {
++		return fmt.Errorf("lstat replay state parent %s: %w", dir, err)
++	}
++	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
++		return fmt.Errorf("replay state parent must be a real directory: %s", dir)
++	}
++	if info.Mode().Perm() != 0o700 {
++		return fmt.Errorf("replay state parent must have mode 0700: %s has %04o", dir, info.Mode().Perm())
++	}
++	return validatePrivateReplayOwner(dir, info, uint32(os.Geteuid()))
++}
++
++func readPrivateReplayFile(path string) ([]byte, error) {
++	if err := validatePrivateReplayParent(filepath.Dir(path)); err != nil {
++		return nil, err
++	}
++	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
++	if err != nil {
++		return nil, fmt.Errorf("open replay state without symlink traversal %s: %w", path, err)
++	}
++	f := os.NewFile(uintptr(fd), path)
++	if f == nil {
++		_ = syscall.Close(fd)
++		return nil, fmt.Errorf("open replay state %s: invalid file descriptor", path)
++	}
++	defer f.Close()
++	info, err := f.Stat()
++	if err != nil {
++		return nil, fmt.Errorf("fstat replay state %s: %w", path, err)
++	}
++	if err := validatePrivateReplayFileInfo(path, info); err != nil {
++		return nil, err
++	}
++	data, err := io.ReadAll(f)
++	if err != nil {
++		return nil, fmt.Errorf("read replay state %s: %w", path, err)
++	}
++	return data, nil
++}
++
++func validatePrivateReplayFileInfo(path string, info os.FileInfo) error {
++	if !info.Mode().IsRegular() {
++		return fmt.Errorf("replay state must be a regular file: %s", path)
++	}
++	if info.Mode().Perm() != 0o600 {
++		return fmt.Errorf("replay state must have mode 0600: %s has %04o", path, info.Mode().Perm())
++	}
++	if err := validatePrivateReplayOwner(path, info, uint32(os.Geteuid())); err != nil {
++		return err
++	}
++	stat, ok := info.Sys().(*syscall.Stat_t)
++	if !ok {
++		return fmt.Errorf("replay state ownership metadata is unavailable: %s", path)
++	}
++	if stat.Nlink != 1 {
++		return fmt.Errorf("replay state must have exactly one hard link: %s has %d", path, stat.Nlink)
++	}
++	return nil
++}
++
++func validatePrivateReplayOwner(path string, info os.FileInfo, expectedUID uint32) error {
++	stat, ok := info.Sys().(*syscall.Stat_t)
++	if !ok {
++		return fmt.Errorf("replay state ownership metadata is unavailable: %s", path)
++	}
++	if stat.Uid != expectedUID {
++		return fmt.Errorf("replay state path must be owned by uid %d: %s is owned by uid %d", expectedUID, path, stat.Uid)
++	}
++	return nil
++}
+diff --git a/internal/protocol/sequence_file_security_unix_test.go b/internal/protocol/sequence_file_security_unix_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..67d2ae484235c86108330f4556d8daa931dfddba
+--- /dev/null
++++ b/internal/protocol/sequence_file_security_unix_test.go
+@@ -0,0 +1,130 @@
++//go:build darwin || linux
++
++package protocol
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func TestRequiredReplayStateRejectsUnsafeFilesystemObjects(t *testing.T) {
++	t.Run("parent mode", func(t *testing.T) {
++		parent := filepath.Join(t.TempDir(), "private")
++		if err := os.Mkdir(parent, 0o700); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.Chmod(parent, 0o750); err != nil {
++			t.Fatal(err)
++		}
++		if err := InitializeRequiredSequenceState(filepath.Join(parent, "state.json")); err == nil || !strings.Contains(err.Error(), "mode 0700") {
++			t.Fatalf("unsafe parent mode error = %v", err)
++		}
++	})
++
++	t.Run("parent symlink", func(t *testing.T) {
++		root := t.TempDir()
++		realParent := filepath.Join(root, "real")
++		if err := os.Mkdir(realParent, 0o700); err != nil {
++			t.Fatal(err)
++		}
++		linkedParent := filepath.Join(root, "linked")
++		if err := os.Symlink(realParent, linkedParent); err != nil {
++			t.Fatal(err)
++		}
++		if err := InitializeRequiredSequenceState(filepath.Join(linkedParent, "state.json")); err == nil || !strings.Contains(err.Error(), "real directory") {
++			t.Fatalf("symlink parent error = %v", err)
++		}
++	})
++
++	t.Run("file mode", func(t *testing.T) {
++		path := newUnsafeReplayState(t, 0o640)
++		if _, err := NewRequiredFileSequenceStore(path).Load(); err == nil || !strings.Contains(err.Error(), "mode 0600") {
++			t.Fatalf("unsafe file mode error = %v", err)
++		}
++	})
++
++	t.Run("file symlink", func(t *testing.T) {
++		parent := secureReplayParent(t)
++		target := filepath.Join(parent, "target.json")
++		if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
++			t.Fatal(err)
++		}
++		link := filepath.Join(parent, "state.json")
++		if err := os.Symlink(target, link); err != nil {
++			t.Fatal(err)
++		}
++		if _, err := NewRequiredFileSequenceStore(link).Load(); err == nil {
++			t.Fatal("required store followed a replay-state symlink")
++		}
++	})
++
++	t.Run("non regular file", func(t *testing.T) {
++		parent := secureReplayParent(t)
++		path := filepath.Join(parent, "state.json")
++		if err := os.Mkdir(path, 0o600); err != nil {
++			t.Fatal(err)
++		}
++		if _, err := NewRequiredFileSequenceStore(path).Load(); err == nil || !strings.Contains(err.Error(), "regular file") {
++			t.Fatalf("non-regular file error = %v", err)
++		}
++	})
++
++	t.Run("hard link", func(t *testing.T) {
++		path := newUnsafeReplayState(t, 0o600)
++		if err := os.Link(path, path+".second-link"); err != nil {
++			t.Fatal(err)
++		}
++		if _, err := NewRequiredFileSequenceStore(path).Load(); err == nil || !strings.Contains(err.Error(), "exactly one hard link") {
++			t.Fatalf("hard-link error = %v", err)
++		}
++	})
++
++	t.Run("ownership", func(t *testing.T) {
++		path := newUnsafeReplayState(t, 0o600)
++		info, err := os.Lstat(path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		wrongUID := uint32(os.Geteuid() + 1)
++		if err := validatePrivateReplayOwner(path, info, wrongUID); err == nil || !strings.Contains(err.Error(), "owned by uid") {
++			t.Fatalf("ownership error = %v", err)
++		}
++	})
++
++	t.Run("save revalidates", func(t *testing.T) {
++		parent := secureReplayParent(t)
++		path := filepath.Join(parent, "state.json")
++		if err := InitializeRequiredSequenceState(path); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.Chmod(path, 0o644); err != nil {
++			t.Fatal(err)
++		}
++		if err := NewRequiredFileSequenceStore(path).Save(map[string]int64{"source": 1}); err == nil {
++			t.Fatal("required store saved through an unsafe replay-state file")
++		}
++	})
++}
++
++func secureReplayParent(t *testing.T) string {
++	t.Helper()
++	parent := filepath.Join(t.TempDir(), "private")
++	if err := os.Mkdir(parent, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	return parent
++}
++
++func newUnsafeReplayState(t *testing.T, mode os.FileMode) string {
++	t.Helper()
++	path := filepath.Join(secureReplayParent(t), "state.json")
++	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(path, mode); err != nil {
++		t.Fatal(err)
++	}
++	return path
++}
+diff --git a/internal/protocol/sequence_hardened_test.go b/internal/protocol/sequence_hardened_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..f72de5a38ed54b04e6e830ff2f70740d7eb00fe9
+--- /dev/null
++++ b/internal/protocol/sequence_hardened_test.go
+@@ -0,0 +1,64 @@
++package protocol
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestReservationDoesNotAdvanceUntilCommit(t *testing.T) {
++	store := NewMemorySequenceStore(nil)
++	tracker, err := NewTrackerFromStore(store)
++	if err != nil {
++		t.Fatal(err)
++	}
++	r, ok := tracker.Reserve("source", 10)
++	if !ok || tracker.seen["source"] != 0 || store.SaveCount != 0 {
++		t.Fatal("reserve advanced replay state before external side effect")
++	}
++	if err := r.Commit(); err != nil {
++		t.Fatal(err)
++	}
++	if tracker.Last("source") != 10 || store.SaveCount != 1 {
++		t.Fatal("commit did not durably advance replay state")
++	}
++}
++
++func TestRequiredReplayStateInitializationIsCreateOnce(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "private", "replay-state.json")
++	if err := InitializeRequiredSequenceState(path); err != nil {
++		t.Fatal(err)
++	}
++	info, err := os.Stat(path)
++	if err != nil || info.Mode().Perm() != 0o600 {
++		t.Fatalf("state mode: info=%v err=%v", info, err)
++	}
++	parentInfo, err := os.Stat(filepath.Dir(path))
++	if err != nil || parentInfo.Mode().Perm() != 0o700 {
++		t.Fatalf("parent mode: info=%v err=%v", parentInfo, err)
++	}
++	store := NewRequiredFileSequenceStore(path)
++	tracker, err := NewTrackerFromStore(store)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !tracker.Accept("source", 10) {
++		t.Fatal("initial accept failed")
++	}
++	if err := InitializeRequiredSequenceState(path); err != nil {
++		t.Fatal(err)
++	}
++	reloaded, err := NewTrackerFromStore(store)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if reloaded.Last("source") != 10 {
++		t.Fatal("initializer reset existing replay state")
++	}
++	if err := os.Remove(path); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := NewTrackerFromStore(store); err == nil {
++		t.Fatal("required store accepted missing replay state")
++	}
++}
+diff --git a/internal/protocol/sequence_store.go b/internal/protocol/sequence_store.go
+index 8d4bc24c495ece59512be17560ac3c2725891d27..83fdab353eb197536256e79dc276c9929bfff56c 100644
+--- a/internal/protocol/sequence_store.go
++++ b/internal/protocol/sequence_store.go
+@@ -2,6 +2,7 @@ package protocol
+ 
+ import (
+ 	"encoding/json"
++	"errors"
+ 	"fmt"
+ 	"maps"
+ 	"os"
+@@ -26,7 +27,8 @@ type SequenceStore interface {
+ // fileSequenceStore writes JSON to a path on disk. Atomic via
+ // CreateTemp + Rename, mirroring internal/state/state.go.Writer.Save.
+ type fileSequenceStore struct {
+-	path string
++	path            string
++	requireExisting bool
+ }
+ 
+ // NewFileSequenceStore returns a SequenceStore backed by path. The
+@@ -37,6 +39,68 @@ func NewFileSequenceStore(path string) SequenceStore {
+ 	return &fileSequenceStore{path: path}
+ }
+ 
++// NewRequiredFileSequenceStore returns a store that rejects a missing state
++// file. Hardened sinks use this after provisioning an explicit empty JSON
++// object before pairing, so deletion or rollback never silently resets replay
++// protection.
++func NewRequiredFileSequenceStore(path string) SequenceStore {
++	return &fileSequenceStore{path: path, requireExisting: true}
++}
++
++// InitializeRequiredSequenceState creates a valid empty replay file exactly
++// once. It never truncates or resets an existing file. Pairing calls this
++// before persisting the sink key so a paired sink can never start without
++// initialized replay defense.
++func InitializeRequiredSequenceState(path string) error {
++	if path == "" || !filepath.IsAbs(path) {
++		return fmt.Errorf("replay state path must be absolute")
++	}
++	dir := filepath.Dir(path)
++	if err := ensurePrivateReplayParent(dir); err != nil {
++		return err
++	}
++	if _, err := readPrivateReplayFile(path); err == nil {
++		_, loadErr := NewRequiredFileSequenceStore(path).Load()
++		return loadErr
++	} else if !errors.Is(err, os.ErrNotExist) {
++		return fmt.Errorf("stat replay state %s: %w", path, err)
++	}
++	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
++	if err != nil {
++		return fmt.Errorf("create replay state %s: %w", path, err)
++	}
++	cleanup := func() { _ = os.Remove(path) }
++	if _, err := f.WriteString("{}\n"); err != nil {
++		f.Close()
++		cleanup()
++		return fmt.Errorf("initialize replay state: %w", err)
++	}
++	if err := f.Sync(); err != nil {
++		f.Close()
++		cleanup()
++		return fmt.Errorf("fsync replay state: %w", err)
++	}
++	if err := f.Close(); err != nil {
++		cleanup()
++		return fmt.Errorf("close replay state: %w", err)
++	}
++	if _, err := readPrivateReplayFile(path); err != nil {
++		cleanup()
++		return fmt.Errorf("validate initialized replay state: %w", err)
++	}
++	parent, err := os.Open(dir)
++	if err != nil {
++		cleanup()
++		return fmt.Errorf("open replay parent for fsync: %w", err)
++	}
++	if err := parent.Sync(); err != nil {
++		parent.Close()
++		cleanup()
++		return fmt.Errorf("fsync replay parent: %w", err)
++	}
++	return parent.Close()
++}
++
+ // DefaultSequencePath is the canonical on-disk location of the
+ // persistent replay-defense state.
+ func DefaultSequencePath(home string) string {
+@@ -44,15 +108,27 @@ func DefaultSequencePath(home string) string {
+ }
+ 
+ func (s *fileSequenceStore) Load() (map[string]int64, error) {
+-	data, err := os.ReadFile(s.path)
++	var data []byte
++	var err error
++	if s.requireExisting {
++		data, err = readPrivateReplayFile(s.path)
++	} else {
++		data, err = os.ReadFile(s.path)
++	}
+ 	if err != nil {
+ 		if os.IsNotExist(err) {
++			if s.requireExisting {
++				return nil, fmt.Errorf("required replay state is missing: %s", s.path)
++			}
+ 			return map[string]int64{}, nil
+ 		}
+ 		return nil, fmt.Errorf("read sequence state %s: %w", s.path, err)
+ 	}
+ 	// Empty file is treated as fresh state (no high-water marks yet).
+ 	if len(data) == 0 {
++		if s.requireExisting {
++			return nil, fmt.Errorf("required replay state is empty: %s", s.path)
++		}
+ 		return map[string]int64{}, nil
+ 	}
+ 	state := map[string]int64{}
+@@ -64,7 +140,11 @@ func (s *fileSequenceStore) Load() (map[string]int64, error) {
+ 
+ func (s *fileSequenceStore) Save(state map[string]int64) error {
+ 	dir := filepath.Dir(s.path)
+-	if err := os.MkdirAll(dir, 0o700); err != nil {
++	if s.requireExisting {
++		if _, err := readPrivateReplayFile(s.path); err != nil {
++			return fmt.Errorf("validate required replay state before save: %w", err)
++		}
++	} else if err := os.MkdirAll(dir, 0o700); err != nil {
+ 		return fmt.Errorf("ensure sequence dir %s: %w", dir, err)
+ 	}
+ 	tmp, err := os.CreateTemp(dir, ".tmp-sequence-*.json")
+@@ -86,6 +166,11 @@ func (s *fileSequenceStore) Save(state map[string]int64) error {
+ 		os.Remove(tmpName)
+ 		return fmt.Errorf("encode sequence state: %w", err)
+ 	}
++	if err := tmp.Sync(); err != nil {
++		tmp.Close()
++		os.Remove(tmpName)
++		return fmt.Errorf("fsync tmp sequence file: %w", err)
++	}
+ 	if err := tmp.Close(); err != nil {
+ 		os.Remove(tmpName)
+ 		return fmt.Errorf("close tmp sequence file: %w", err)
+@@ -94,6 +179,22 @@ func (s *fileSequenceStore) Save(state map[string]int64) error {
+ 		os.Remove(tmpName)
+ 		return fmt.Errorf("rename sequence file into place: %w", err)
+ 	}
++	if s.requireExisting {
++		if _, err := readPrivateReplayFile(s.path); err != nil {
++			return fmt.Errorf("validate required replay state after save: %w", err)
++		}
++	}
++	parent, err := os.Open(dir)
++	if err != nil {
++		return fmt.Errorf("open sequence parent for fsync: %w", err)
++	}
++	if err := parent.Sync(); err != nil {
++		parent.Close()
++		return fmt.Errorf("fsync sequence parent: %w", err)
++	}
++	if err := parent.Close(); err != nil {
++		return fmt.Errorf("close sequence parent: %w", err)
++	}
+ 	return nil
+ }
+ 
+diff --git a/scripts/install-beta.sh b/scripts/install-beta.sh
+index a48088a7e0816038ab53d9f71734eef04d830b14..b68ba8b50efd86341cdf097d9a482e29c497a45e 100755
+--- a/scripts/install-beta.sh
++++ b/scripts/install-beta.sh
+@@ -15,8 +15,8 @@
+ # Optional flags:
+ #   --peer <hostname>          Tailscale hostname of the OTHER machine.
+ #                              If omitted, the script prompts interactively.
+-#   --code <code>              [sink] Pairing code printed by the source's
+-#                              wizard install. Forwarded to wizard install.
++#   --code-stdin               [sink] Read the pairing code from stdin.
++#                              Pairing codes in argv are rejected.
+ #   --pair-url <url>           [sink] Source's pairing URL (e.g.
+ #                              http://<source>:9998/pair). Forwarded to wizard install.
+ #   --skip-keychain-prompt     [sink] Forwarded to wizard install. Auto-set
+@@ -43,7 +43,7 @@ set -euo pipefail
+ 
+ ROLE=""
+ PEER=""
+-CODE=""
++CODE_STDIN=""
+ PAIR_URL=""
+ SKIP_KEYCHAIN_PROMPT=""
+ EXTRA_WIZARD_ARGS=()
+@@ -81,7 +81,9 @@ while [[ $# -gt 0 ]]; do
+     --peer)
+       PEER="$2"; shift 2 ;;
+     --code)
+-      CODE="$2"; shift 2 ;;
++      die "--code was removed because process arguments can leak pairing codes; pipe the code to --code-stdin" ;;
++    --code-stdin)
++      CODE_STDIN="1"; shift ;;
+     --pair-url)
+       PAIR_URL="$2"; shift 2 ;;
+     --skip-keychain-prompt)
+@@ -149,7 +151,7 @@ if [[ -z "$TARBALL" ]]; then
+   step "downloading latest release from $REPO"
+   TMP_DL="$(mktemp -d -t agentcookie-beta.XXXXXX)"
+   gh release download --repo "$REPO" --pattern '*darwin_arm64.tar.gz' --dir "$TMP_DL" --clobber
+-  TARBALL="$(ls -1 "$TMP_DL"/*.tar.gz | head -n1)"
++  TARBALL="$(find "$TMP_DL" -maxdepth 1 -type f -name '*.tar.gz' -print | head -n1)"
+   if [[ -z "$TARBALL" || ! -f "$TARBALL" ]]; then
+     die "release tarball not found after download (looked in $TMP_DL)"
+   fi
+@@ -221,15 +223,19 @@ if [[ -z "$PEER" ]]; then
+   prompt PEER "peer hostname"
+ fi
+ 
+-# Sink-only: collect the pair code and pair URL from the source's
+-# wizard install output. Both are required (the wizard refuses to
+-# start without them) so prompt if not passed.
++# Sink-only: read the pair code without ever putting it in argv, and collect
++# the pair URL from the source's wizard output.
+ if [[ "$ROLE" == "sink" ]]; then
+-  if [[ -z "$CODE" ]]; then
++  if [[ -n "$CODE_STDIN" ]]; then
++    IFS= read -r CODE || die "could not read pairing code from stdin"
++  else
+     echo "    Paste the pairing code printed by the source's wizard install"
+     echo "    (looks like 'XXXX-YYYY-ZZZZ'):"
+-    prompt CODE "pair code"
++    read -rsp "    pair code: " CODE
++    printf '\n'
+   fi
++  [[ -n "$CODE" ]] || die "pairing code from stdin is empty"
++  trap 'unset CODE' EXIT
+   if [[ -z "$PAIR_URL" ]]; then
+     echo "    Paste the pair URL printed by the source's wizard install"
+     echo "    (looks like 'http://<source-host>:9998/pair'):"
+@@ -239,7 +245,7 @@ fi
+ 
+ WIZARD_ARGS=(wizard install --as "$ROLE" --peer "$PEER")
+ if [[ "$ROLE" == "sink" ]]; then
+-  WIZARD_ARGS+=(--code "$CODE" --pair-url "$PAIR_URL")
++  WIZARD_ARGS+=(--code-stdin --pair-url "$PAIR_URL")
+ fi
+ for b in "${EXTRA_BINS[@]:-}"; do
+   [[ -z "$b" ]] && continue
+@@ -273,7 +279,12 @@ if [[ -n "$SKIP_KEYCHAIN_PROMPT" ]]; then
+   WIZARD_ARGS+=(--skip-keychain-prompt)
+ fi
+ 
+-"$TARGET" "${WIZARD_ARGS[@]}"
++if [[ "$ROLE" == "sink" ]]; then
++  printf '%s\n' "$CODE" | "$TARGET" "${WIZARD_ARGS[@]}"
++  unset CODE
++else
++  "$TARGET" "${WIZARD_ARGS[@]}"
++fi
+ 
+ # ---- final doctor check ----
+ 
+diff --git a/skill/SKILL.md b/skill/SKILL.md
+index a928f2b445023bb857a4ee6324b7a0d3c93959ac..bd804772ca5e57b0c186c246de901a8bef457271 100644
+--- a/skill/SKILL.md
++++ b/skill/SKILL.md
+@@ -57,14 +57,13 @@ Or build from source:
+ go install github.com/mvanhorn/agentcookie/cmd/agentcookie@v1.0.0
+ ```
+ 
+-Run the source wizard. It blocks until pairing completes:
++Run the source wizard in an owner-attended foreground terminal. It blocks until pairing completes and writes the one-time code only to that controlling terminal:
+ 
+ ```bash
+-agentcookie wizard install --as source --peer <linux-hostname> &
+-WIZARD_PID=$!
++agentcookie wizard install --as source --peer <linux-hostname>
+ ```
+ 
+-Run in the background because we need to poll the pairing info file:
++In a separate agent session, poll only for the nonsecret routing metadata:
+ 
+ ```bash
+ # Wait up to 30 seconds for the pairing info to appear.
+@@ -72,10 +71,10 @@ for i in {1..120}; do
+   if [ -f ~/.agentcookie/pairing.json ]; then break; fi
+   sleep 0.25
+ done
+-cat ~/.agentcookie/pairing.json
++cat ~/.agentcookie/pairing.json  # peer, pair_url, sink_run, status; never code
+ ```
+ 
+-Extract `code` and `pair_url` from the JSON output. These are what the sink needs. The code expires in 10 minutes.
++Extract only `pair_url` from the JSON. The attending owner reads the 10-minute code directly from the source terminal and enters it at the sink's hidden stdin prompt. Agents must never read, persist, relay, or log the code.
+ 
+ ### Step 3: install on the Linux sink
+ 
+@@ -118,10 +117,12 @@ domains: []
+ EOF
+ 
+ # Pair with the Mac source
+-agentcookie pair --as sink \
++read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
++printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \
+   --peer <mac-hostname> \
+-  --code <code-from-pairing.json> \
+-  --pair-url <pair_url-from-pairing.json>
++  --pair-url <pair_url-from-pairing.json> \
++  --code-stdin
++unset AGENTCOOKIE_PAIR_CODE
+ ```
+ 
+ ### Step 4: attach to existing Chrome (or start one as fallback)
+@@ -212,10 +213,12 @@ For Mac-to-Mac, the wizard works:
+ 
+ ```bash
+ # On the second Mac
+-agentcookie wizard install --as sink \
++read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
++printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie wizard install --as sink \
+   --peer <source-mac-hostname> \
+-  --code <pairing-code> \
+-  --pair-url http://<source-mac>:9998/pair
++  --pair-url http://<source-mac>:9998/pair \
++  --code-stdin
++unset AGENTCOOKIE_PAIR_CODE
+ ```
+ 
+ The macOS sink writes to Chrome's encrypted SQLite, the plaintext sidecar, and per-CLI adapter session files.
+diff --git a/skill/prompts/install-on-both-machines.md b/skill/prompts/install-on-both-machines.md
+index 5234bfbc1dbffc267f99d4a74fdda81569ded0a8..7a39269d5bdc0b7db1e93a9b4dc28dc2cebe1cfd 100644
+--- a/skill/prompts/install-on-both-machines.md
++++ b/skill/prompts/install-on-both-machines.md
+@@ -8,8 +8,8 @@ The agent should:
+ 
+ 1. Detect Tailscale and identify the peer machine.
+ 2. Confirm source vs sink with you.
+-3. Run `agentcookie wizard install --as source` here on the Mac, in the background.
+-4. Read the pairing code from `~/.agentcookie/pairing.json` once it appears.
++3. Run `agentcookie wizard install --as source` here on the Mac in an owner-attended terminal. Do not background or redirect it.
++4. Read only the nonsecret peer/address metadata from `~/.agentcookie/pairing.json`. Ask the owner to enter the code through the sink command's hidden stdin prompt; the agent must never read, persist, or relay it.
+ 5. SSH to the Linux box and:
+    - Install the agentcookie binary
+    - Write `sink.yaml` with `live_cdp.enabled: true` and the tailnet IP
+@@ -28,10 +28,11 @@ Total elapsed time: about 60 seconds. You do not need to be at the Linux box's s
+ The wizard works on macOS sinks:
+ 
+ ```bash
+-ssh <mac-mini-hostname> "agentcookie wizard install --as sink \
+-  --peer <source-hostname> \
+-  --code <code> \
+-  --pair-url <url>"
++read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
++printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | ssh <mac-mini-hostname> \
++  "agentcookie wizard install --as sink --peer <source-hostname> \
++  --pair-url <url> --code-stdin"
++unset AGENTCOOKIE_PAIR_CODE
+ ```
+ 
+ ## When the prompt is not enough

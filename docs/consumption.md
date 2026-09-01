@@ -117,11 +117,15 @@ Chrome via CDP instead of writing Chrome's SQLite.
    ```bash
    # On Mac (source):
    agentcookie wizard install --as source --peer <linux-tailscale-hostname>
-   # The wizard prints a pairing code and URL
+   # The code appears only on the owner's controlling terminal; pairing.json
+   # contains nonsecret peer/address metadata, not the code.
 
    # On Linux (sink):
-   agentcookie pair --as sink --peer <mac-hostname> \
-     --pair-url http://<mac-hostname>:9998/pair --code <code>
+   read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
+   printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \
+     --peer <mac-hostname> --pair-url http://<mac-hostname>:9998/pair \
+     --code-stdin
+   unset AGENTCOOKIE_PAIR_CODE
    ```
 
 4. **Start Chrome with CDP enabled**:

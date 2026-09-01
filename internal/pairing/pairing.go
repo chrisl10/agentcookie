@@ -1,9 +1,9 @@
 // Package pairing implements the source-sink pairing handshake.
 //
 // The flow: source generates an X25519 ephemeral keypair plus a short
-// human-typable pairing code, starts an HTTP listener, and prints the code
-// to the user. The user runs the sink-side command with that code on the
-// other machine. Sink generates its own X25519 keypair, POSTs its public
+// human-typable pairing code, starts an HTTP listener, and writes the code
+// only to an owner-attended controlling terminal. The owner enters it through
+// hidden stdin on the other machine. Sink generates its own X25519 keypair, POSTs its public
 // key (and the pairing code) to the source's pairing endpoint. Source
 // verifies the code, replies with its public key. Both sides compute the
 // X25519 shared secret and run HKDF-SHA256 over (shared_secret, salt=code,
@@ -128,17 +128,31 @@ func DeriveKey(sharedSecret []byte, code Code) ([]byte, string, error) {
 	return key, fp, nil
 }
 
-// RunSource starts the source-side listener, prints the code, waits for the
-// sink to connect. Returns the derived key + peer info on success.
-func RunSource(ctx context.Context, listenAddr, localHostname string, w io.Writer) (*HandshakeResult, Code, error) {
+// RunSource starts the source-side listener and waits for the sink to connect.
+// The raw one-time code is written only to secretWriter, which callers bind to
+// an owner-attended controlling terminal. statusWriter is safe to redirect to
+// logs and never receives the code.
+func RunSource(ctx context.Context, listenAddr, localHostname string, statusWriter, secretWriter io.Writer) (*HandshakeResult, error) {
+	code, err := NewCode()
+	if err != nil {
+		return nil, err
+	}
+	return runSourceWithCode(ctx, listenAddr, localHostname, code, statusWriter, secretWriter)
+}
+
+func runSourceWithCode(ctx context.Context, listenAddr, localHostname string, code Code, statusWriter, secretWriter io.Writer) (*HandshakeResult, error) {
+	if statusWriter == nil {
+		statusWriter = io.Discard
+	}
+	if secretWriter == nil {
+		return nil, fmt.Errorf("owner-attended pairing-code writer is required")
+	}
+	defer func() { code = "" }()
+
 	curve := ecdh.X25519()
 	priv, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, "", fmt.Errorf("gen ephemeral key: %w", err)
-	}
-	code, err := NewCode()
-	if err != nil {
-		return nil, "", err
+		return nil, fmt.Errorf("gen ephemeral key: %w", err)
 	}
 
 	resultCh := make(chan *HandshakeResult, 1)
@@ -210,9 +224,15 @@ func RunSource(ctx context.Context, listenAddr, localHostname string, w io.Write
 	srv := httpserver.Configure(&http.Server{Addr: listenAddr, Handler: mux}, httpserver.Pair)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		return nil, "", fmt.Errorf("listen %s: %w", listenAddr, err)
+		return nil, fmt.Errorf("listen %s: %w", listenAddr, err)
 	}
 	defer ln.Close()
+
+	if err := writeOwnerSecret(secretWriter, code); err != nil {
+		_ = srv.Close()
+		_ = ln.Close()
+		return nil, err
+	}
 
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -220,15 +240,17 @@ func RunSource(ctx context.Context, listenAddr, localHostname string, w io.Write
 		}
 	}()
 
-	fmt.Fprintln(w, "agentcookie pair (source side)")
-	fmt.Fprintln(w, "  pairing code:", code)
-	fmt.Fprintln(w, "  source hostname:", localHostname)
-	fmt.Fprintln(w, "  listening on:", listenAddr)
-	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "  Run this on the sink machine within", PairTimeout)
-	fmt.Fprintf(w, "    agentcookie pair --as sink --peer %s --pair-url http://%s/pair --code %s\n", localHostname, listenAddr, code)
-	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "  Waiting for sink...")
+	fmt.Fprintln(statusWriter, "agentcookie pair (source side)")
+	fmt.Fprintln(statusWriter, "  pairing code: delivered directly to the controlling terminal")
+	fmt.Fprintln(statusWriter, "  source hostname:", localHostname)
+	fmt.Fprintln(statusWriter, "  listening on:", listenAddr)
+	fmt.Fprintln(statusWriter, "")
+	fmt.Fprintln(statusWriter, "  Run this on the sink machine within", PairTimeout)
+	fmt.Fprintln(statusWriter, "    read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\\n'")
+	fmt.Fprintf(statusWriter, "    printf '%%s\\n' \"$AGENTCOOKIE_PAIR_CODE\" | agentcookie pair --as sink --peer %s --pair-url http://%s/pair --code-stdin\n", localHostname, listenAddr)
+	fmt.Fprintln(statusWriter, "    unset AGENTCOOKIE_PAIR_CODE")
+	fmt.Fprintln(statusWriter, "")
+	fmt.Fprintln(statusWriter, "  Waiting for sink...")
 
 	pairCtx, cancel := context.WithTimeout(ctx, PairTimeout)
 	defer cancel()
@@ -236,21 +258,40 @@ func RunSource(ctx context.Context, listenAddr, localHostname string, w io.Write
 	case <-pairCtx.Done():
 		_ = srv.Shutdown(context.Background())
 		if errors.Is(pairCtx.Err(), context.DeadlineExceeded) {
-			return nil, code, fmt.Errorf("pairing timed out after %s without a sink connection", PairTimeout)
+			return nil, fmt.Errorf("pairing timed out after %s without a sink connection", PairTimeout)
 		}
-		return nil, code, pairCtx.Err()
+		return nil, pairCtx.Err()
 	case err := <-errCh:
-		return nil, code, err
+		return nil, err
 	case res := <-resultCh:
 		_ = srv.Shutdown(context.Background())
-		return res, code, nil
+		return res, nil
 	}
+}
+
+func writeOwnerSecret(secretWriter io.Writer, code Code) error {
+	const prefix = "agentcookie one-time pairing code: "
+	announcement := make([]byte, 0, len(prefix)+len(code)+1)
+	announcement = append(announcement, prefix...)
+	announcement = append(announcement, code...)
+	announcement = append(announcement, '\n')
+	expected := len(announcement)
+	defer clear(announcement)
+	written, err := secretWriter.Write(announcement)
+	if err != nil {
+		return fmt.Errorf("deliver pairing code to controlling terminal: %w", err)
+	}
+	if written != expected {
+		return fmt.Errorf("deliver pairing code to controlling terminal: %w", io.ErrShortWrite)
+	}
+	return nil
 }
 
 // RunSink performs the sink-side handshake: connect to source's pairing URL,
 // send our public key + the code, receive source's public key, derive the
 // shared key.
 func RunSink(ctx context.Context, sourcePairURL string, providedCode Code, localHostname string) (*HandshakeResult, error) {
+	defer func() { providedCode = "" }()
 	curve := ecdh.X25519()
 	priv, err := curve.GenerateKey(rand.Reader)
 	if err != nil {

@@ -111,11 +111,10 @@ go install github.com/mvanhorn/agentcookie/cmd/agentcookie@v1.0.0
 # 1. Run the source wizard (interactive)
 agentcookie wizard install --as source --peer <linux-tailscale-hostname>
 
-# The wizard prints a pairing code and URL. Keep this terminal open.
-# Example output:
-#   Pairing code: ABCD-EFGH-IJKL
-#   Pair URL: http://your-mac.tailnet:9998/pair
-#   Waiting for sink to pair...
+# The wizard writes the code only to this controlling terminal and records
+# only nonsecret peer/address metadata in pairing.json. Keep it open.
+# The one-time value appears only on this controlling terminal.
+# Redirected status output contains the pair URL and waiting state, never code.
 ```
 
 ### Linux sink setup (featured: Grok Bot / trusted single-operator box)
@@ -151,10 +150,12 @@ domains: []
 EOF
 
 # 5. Pair with the Mac source
-agentcookie pair --as sink \
+read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
+printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink \
   --peer your-mac.tailnet \
-  --code ABCD-EFGH-IJKL \
-  --pair-url http://your-mac.tailnet:9998/pair
+  --pair-url http://your-mac.tailnet:9998/pair \
+  --code-stdin
+unset AGENTCOOKIE_PAIR_CODE
 ```
 
 Replace:
@@ -264,10 +265,12 @@ macOS sinks are still supported. The wizard works:
 
 ```bash
 # On the second Mac
-agentcookie wizard install --as sink \
+read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
+printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie wizard install --as sink \
   --peer <source-mac-hostname> \
-  --code <pairing-code> \
-  --pair-url http://<source-mac>:9998/pair
+  --pair-url http://<source-mac>:9998/pair \
+  --code-stdin
+unset AGENTCOOKIE_PAIR_CODE
 ```
 
 The macOS sink writes to Chrome's encrypted SQLite, the plaintext sidecar, and per-CLI adapter session files. It can also run CDP injection into a managed Chrome subprocess. See [docs/quickstart.md](docs/quickstart.md) for the full macOS-to-macOS walkthrough.

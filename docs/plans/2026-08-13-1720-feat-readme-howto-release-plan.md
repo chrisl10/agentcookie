@@ -41,7 +41,7 @@ No cookie values in any file. No CDP on the tailnet. Do not start a second Chrom
 4. Attach to the already-running box Chrome. Never `cdp.managed` / LaunchOwnedChrome / `:9400`.
 5. Doctor can print `sync-all` while `/sync` drops everything. Verify with ok-line `live_cdp: injected N cookies into M context(s)` and `LastWriteMode` containing `livecdp`, not the policy label. Linux `wrote 0 cookies` is expected. Sidecar is not success.
 6. Default CDP port 9223; doctor also probes 9222/9224/9228/9229/9400. How-to must say what to do when Chrome is on 9228.
-7. Pairing: Mac `wizard install --as source --peer <linux-tailscale-name>`; user relays the pairing code (10-minute, not a cookie); Linux `pair` with `--code` and `--pair-url`. Cookie values must never appear.
+7. Pairing: Mac `wizard install --as source --peer <linux-tailscale-name>`; user relays the pairing code (10-minute, not a cookie); Linux reads it with hidden input and passes it through stdin using `--code-stdin` plus `--pair-url`. Pairing codes and cookie values must never appear in argv.
 8. Keep the sink alive: copy the wizard-printed systemd user unit (do not auto-install). Fresh browserUse only works while the sink is still polling.
 
 ## Units (do all of these)

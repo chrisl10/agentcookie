@@ -97,8 +97,8 @@ On the sink, in the `/sync` handler:
 
 ## Lifecycle: pairing
 
-1. Source: `agentcookie pair --as source` generates an X25519 ephemeral keypair and a fresh base32 code (e.g. `YILU-OIVK`). Listens on `:9998/pair`. Prints the code and the sink-run command.
-2. Sink: `agentcookie pair --as sink --peer <source-host> --pair-url ... --code YILU-OIVK` generates its own X25519 keypair, POSTs `(code, sink_pub, sink_hostname)` to source.
+1. Source: `agentcookie pair --as source` generates an X25519 ephemeral keypair and a fresh base32 code (e.g. `YILU-OIVK`). It auto-detects and binds only the source's Tailscale `100.x` address, such as `100.98.176.68:9998`; wildcard and non-Tailnet binds are refused. The code is written only to the owner's controlling terminal.
+2. Sink: `printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie pair --as sink --peer <source-host> --pair-url http://100.98.176.68:9998/pair --code-stdin` reads the code from stdin, generates its own X25519 keypair, and POSTs `(code, sink_pub, sink_hostname)` to the exact Tailnet-only source endpoint.
 3. Source checks the code (constant-time compare). Computes `shared = X25519(source_priv, sink_pub)`. Derives `key = HKDF-SHA256(shared, salt=code, info="agentcookie-pair-v1")[:32]`. Replies with `(source_pub, source_hostname, fingerprint)`.
 4. Sink computes the same `shared`, derives the same key. Verifies the source's fingerprint matches its own. Writes the key to `~/.config/agentcookie/keys/<source-host>.json` mode 0600.
 5. Source's listener shuts down; the key it derived is also written to disk on the source side, keyed by the sink's hostname.

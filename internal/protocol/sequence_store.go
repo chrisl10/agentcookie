@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -26,7 +27,8 @@ type SequenceStore interface {
 // fileSequenceStore writes JSON to a path on disk. Atomic via
 // CreateTemp + Rename, mirroring internal/state/state.go.Writer.Save.
 type fileSequenceStore struct {
-	path string
+	path            string
+	requireExisting bool
 }
 
 // NewFileSequenceStore returns a SequenceStore backed by path. The
@@ -37,6 +39,68 @@ func NewFileSequenceStore(path string) SequenceStore {
 	return &fileSequenceStore{path: path}
 }
 
+// NewRequiredFileSequenceStore returns a store that rejects a missing state
+// file. Hardened sinks use this after provisioning an explicit empty JSON
+// object before pairing, so deletion or rollback never silently resets replay
+// protection.
+func NewRequiredFileSequenceStore(path string) SequenceStore {
+	return &fileSequenceStore{path: path, requireExisting: true}
+}
+
+// InitializeRequiredSequenceState creates a valid empty replay file exactly
+// once. It never truncates or resets an existing file. Pairing calls this
+// before persisting the sink key so a paired sink can never start without
+// initialized replay defense.
+func InitializeRequiredSequenceState(path string) error {
+	if path == "" || !filepath.IsAbs(path) {
+		return fmt.Errorf("replay state path must be absolute")
+	}
+	dir := filepath.Dir(path)
+	if err := ensurePrivateReplayParent(dir); err != nil {
+		return err
+	}
+	if _, err := readPrivateReplayFile(path); err == nil {
+		_, loadErr := NewRequiredFileSequenceStore(path).Load()
+		return loadErr
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat replay state %s: %w", path, err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create replay state %s: %w", path, err)
+	}
+	cleanup := func() { _ = os.Remove(path) }
+	if _, err := f.WriteString("{}\n"); err != nil {
+		f.Close()
+		cleanup()
+		return fmt.Errorf("initialize replay state: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		cleanup()
+		return fmt.Errorf("fsync replay state: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("close replay state: %w", err)
+	}
+	if _, err := readPrivateReplayFile(path); err != nil {
+		cleanup()
+		return fmt.Errorf("validate initialized replay state: %w", err)
+	}
+	parent, err := os.Open(dir)
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("open replay parent for fsync: %w", err)
+	}
+	if err := parent.Sync(); err != nil {
+		parent.Close()
+		cleanup()
+		return fmt.Errorf("fsync replay parent: %w", err)
+	}
+	return parent.Close()
+}
+
 // DefaultSequencePath is the canonical on-disk location of the
 // persistent replay-defense state.
 func DefaultSequencePath(home string) string {
@@ -44,15 +108,27 @@ func DefaultSequencePath(home string) string {
 }
 
 func (s *fileSequenceStore) Load() (map[string]int64, error) {
-	data, err := os.ReadFile(s.path)
+	var data []byte
+	var err error
+	if s.requireExisting {
+		data, err = readPrivateReplayFile(s.path)
+	} else {
+		data, err = os.ReadFile(s.path)
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
+			if s.requireExisting {
+				return nil, fmt.Errorf("required replay state is missing: %s", s.path)
+			}
 			return map[string]int64{}, nil
 		}
 		return nil, fmt.Errorf("read sequence state %s: %w", s.path, err)
 	}
 	// Empty file is treated as fresh state (no high-water marks yet).
 	if len(data) == 0 {
+		if s.requireExisting {
+			return nil, fmt.Errorf("required replay state is empty: %s", s.path)
+		}
 		return map[string]int64{}, nil
 	}
 	state := map[string]int64{}
@@ -64,7 +140,11 @@ func (s *fileSequenceStore) Load() (map[string]int64, error) {
 
 func (s *fileSequenceStore) Save(state map[string]int64) error {
 	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if s.requireExisting {
+		if _, err := readPrivateReplayFile(s.path); err != nil {
+			return fmt.Errorf("validate required replay state before save: %w", err)
+		}
+	} else if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("ensure sequence dir %s: %w", dir, err)
 	}
 	tmp, err := os.CreateTemp(dir, ".tmp-sequence-*.json")
@@ -86,6 +166,11 @@ func (s *fileSequenceStore) Save(state map[string]int64) error {
 		os.Remove(tmpName)
 		return fmt.Errorf("encode sequence state: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("fsync tmp sequence file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("close tmp sequence file: %w", err)
@@ -93,6 +178,22 @@ func (s *fileSequenceStore) Save(state map[string]int64) error {
 	if err := os.Rename(tmpName, s.path); err != nil {
 		os.Remove(tmpName)
 		return fmt.Errorf("rename sequence file into place: %w", err)
+	}
+	if s.requireExisting {
+		if _, err := readPrivateReplayFile(s.path); err != nil {
+			return fmt.Errorf("validate required replay state after save: %w", err)
+		}
+	}
+	parent, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open sequence parent for fsync: %w", err)
+	}
+	if err := parent.Sync(); err != nil {
+		parent.Close()
+		return fmt.Errorf("fsync sequence parent: %w", err)
+	}
+	if err := parent.Close(); err != nil {
+		return fmt.Errorf("close sequence parent: %w", err)
 	}
 	return nil
 }

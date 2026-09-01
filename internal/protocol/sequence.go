@@ -19,6 +19,16 @@ type SequenceTracker struct {
 	store SequenceStore
 }
 
+// SequenceReservation serializes acceptance for one envelope while its
+// external side effect is performed. The caller must Commit only after the
+// side effect succeeds, or Abort on every failure path.
+type SequenceReservation struct {
+	tracker *SequenceTracker
+	source  string
+	seq     int64
+	active  bool
+}
+
 // NewSequenceTracker returns a fresh tracker with no persistence. Kept
 // for tests and for callers that genuinely want in-memory state. Sink
 // code should use NewTrackerFromStore so state survives restart.
@@ -55,26 +65,63 @@ func NewTrackerFromStore(store SequenceStore) (*SequenceTracker, error) {
 // the in-memory update is rolled back and Accept returns false to
 // avoid acknowledging a write that did not survive a restart.
 func (t *SequenceTracker) Accept(source string, seq int64) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	prev, hadPrev := t.seen[source]
-	if hadPrev && seq <= prev {
+	reservation, ok := t.Reserve(source, seq)
+	if !ok {
 		return false
 	}
-	t.seen[source] = seq
+	return reservation.Commit() == nil
+}
+
+// Reserve validates seq without advancing durable or in-memory high-water
+// state. It retains the tracker lock until Commit or Abort so concurrent
+// requests cannot both perform an irreversible injection for the same
+// sequence window.
+func (t *SequenceTracker) Reserve(source string, seq int64) (*SequenceReservation, bool) {
+	t.mu.Lock()
+	if source == "" || seq <= 0 {
+		t.mu.Unlock()
+		return nil, false
+	}
+	if prev, ok := t.seen[source]; ok && seq <= prev {
+		t.mu.Unlock()
+		return nil, false
+	}
+	return &SequenceReservation{tracker: t, source: source, seq: seq, active: true}, true
+}
+
+// Commit durably advances the replay high-water mark and releases the
+// reservation. A persistence failure restores the in-memory value.
+func (r *SequenceReservation) Commit() error {
+	if r == nil || !r.active {
+		return fmt.Errorf("inactive sequence reservation")
+	}
+	t := r.tracker
+	prev, hadPrev := t.seen[r.source]
+	t.seen[r.source] = r.seq
 	if t.store != nil {
 		if err := t.store.Save(t.seen); err != nil {
-			// Roll back the in-memory update so the persistent and
-			// in-memory state stay consistent across restarts.
 			if hadPrev {
-				t.seen[source] = prev
+				t.seen[r.source] = prev
 			} else {
-				delete(t.seen, source)
+				delete(t.seen, r.source)
 			}
-			return false
+			r.active = false
+			t.mu.Unlock()
+			return err
 		}
 	}
-	return true
+	r.active = false
+	t.mu.Unlock()
+	return nil
+}
+
+// Abort releases a reservation without changing replay state.
+func (r *SequenceReservation) Abort() {
+	if r == nil || !r.active {
+		return
+	}
+	r.active = false
+	r.tracker.mu.Unlock()
 }
 
 // Last returns the highest sequence seen for source, or 0 if none.

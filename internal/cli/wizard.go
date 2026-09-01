@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -28,7 +29,7 @@ var (
 	wizardListen             string
 	wizardLocalName          string
 	wizardSinkURL            string
-	wizardCode               string
+	wizardCodeStdin          bool
 	wizardPairURL            string
 	wizardRepair             bool
 	wizardForce              bool
@@ -55,14 +56,17 @@ var wizardCmd = &cobra.Command{
 machine, runnable by an AI agent over SSH or locally, end-to-end.
 
   agentcookie wizard install --as source --peer <sink-hostname>
-  agentcookie wizard install --as sink   --peer <source-hostname> \
-                                         --code <pairing-code>    \
-                                         --pair-url <source-pair-url>
+  read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'
+  printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | agentcookie wizard install \
+    --as sink --peer <source-hostname> --pair-url <source-pair-url> \
+    --code-stdin
+  unset AGENTCOOKIE_PAIR_CODE
 
-The source-side run drops configs, starts a pairing listener, writes the
-sink-run command into ~/.agentcookie/pairing.json so an agent can SSH
-to the sink and read it, and on successful pairing installs a LaunchAgent
-that runs 'agentcookie source --watch' from then on.
+The source-side run drops configs, starts a pairing listener, writes only
+nonsecret peer/address/status metadata into ~/.agentcookie/pairing.json,
+and displays the one-time code directly on the owner's controlling terminal.
+On successful pairing it installs a LaunchAgent that runs
+'agentcookie source --watch' from then on.
 
 The sink-side run drops configs (with cdp.managed: true by default so no
 Keychain prompt fires), runs the sink-side handshake against the source's
@@ -91,10 +95,10 @@ func init() {
 
 	wizardInstallCmd.Flags().StringVar(&wizardRole, "as", "", "source | sink (required)")
 	wizardInstallCmd.Flags().StringVar(&wizardPeer, "peer", "", "the OTHER machine's hostname")
-	wizardInstallCmd.Flags().StringVar(&wizardListen, "listen", "", "[source] pairing listener bind address (default 0.0.0.0:9998)")
+	wizardInstallCmd.Flags().StringVar(&wizardListen, "listen", "", "[source] pairing listener bind address (default: auto-detected Tailscale 100.x:9998; explicit wildcard binds are refused)")
 	wizardInstallCmd.Flags().StringVar(&wizardLocalName, "local-name", "", "hostname this side announces (default os.Hostname)")
 	wizardInstallCmd.Flags().StringVar(&wizardSinkURL, "sink-url", "", "[source] override sink URL (default http://<peer>:9999/sync)")
-	wizardInstallCmd.Flags().StringVar(&wizardCode, "code", "", "[sink] pairing code (from source's wizard output)")
+	wizardInstallCmd.Flags().BoolVar(&wizardCodeStdin, "code-stdin", false, "[sink] read the required pairing code from stdin")
 	wizardInstallCmd.Flags().StringVar(&wizardPairURL, "pair-url", "", "[sink] source's pairing URL")
 	wizardInstallCmd.Flags().BoolVar(&wizardRepair, "repair", false, "force a fresh pairing handshake even if a key already exists")
 	wizardInstallCmd.Flags().BoolVar(&wizardForce, "force", false, "overwrite existing source.yaml / sink.yaml / blocklist.yaml")
@@ -139,7 +143,7 @@ func runWizardInstall(cmd *cobra.Command, args []string) error {
 	case "source":
 		installErr = wizardInstallSource(cmd.Context(), binPath, logDir)
 	case "sink":
-		installErr = wizardInstallSink(cmd.Context(), binPath, logDir)
+		installErr = wizardInstallSink(cmd.Context(), binPath, logDir, cmd.InOrStdin())
 	}
 	if installErr != nil {
 		return installErr
@@ -204,13 +208,16 @@ func wizardInstallSource(ctx context.Context, binPath, logDir string) error {
 		} else if err := validateListenAddr(listen); err != nil {
 			return fmt.Errorf("--listen %q: %w", listen, err)
 		}
-		// Write a pairing info file so an SSH'ing agent can grab it.
-		pairingInfo, code, err := beginSourcePairing(ctx, listen, wizardLocalName, binPath, logDir)
+		secretTTY, err := openPairingSecretTTY()
+		if err != nil {
+			return err
+		}
+		defer secretTTY.Close()
+		res, err := beginSourcePairing(ctx, listen, wizardLocalName, os.Stderr, secretTTY, defaultPairingInfoPath())
 		if err != nil {
 			return fmt.Errorf("pairing: %w", err)
 		}
-		fmt.Fprintln(os.Stderr, pairingInfo)
-		fmt.Fprintf(os.Stderr, "agentcookie wizard: paired with %q (code was %s)\n", wizardPeer, code)
+		fmt.Fprintf(os.Stderr, "agentcookie wizard: paired with %q (fingerprint %s)\n", wizardPeer, res.Fingerprint)
 	}
 
 	// Step 4: install the daemon unless skipped.
@@ -240,10 +247,18 @@ func wizardInstallSource(ctx context.Context, binPath, logDir string) error {
 	return nil
 }
 
-func wizardInstallSink(ctx context.Context, binPath, logDir string) error {
-	if wizardCode == "" || wizardPairURL == "" {
-		return fmt.Errorf("--code and --pair-url are required when --as sink")
+func wizardInstallSink(ctx context.Context, binPath, logDir string, input io.Reader) error {
+	if wizardPairURL == "" {
+		return fmt.Errorf("--pair-url is required when --as sink")
 	}
+	if !wizardCodeStdin {
+		return fmt.Errorf("--code-stdin is required when --as sink; pairing codes in process arguments are not supported")
+	}
+	wizardCode, err := readPairingCode(input)
+	if err != nil {
+		return err
+	}
+	defer func() { wizardCode = "" }()
 	if err := os.MkdirAll(common.ConfigDir, 0o755); err != nil {
 		return err
 	}
@@ -322,7 +337,7 @@ func wizardInstallSink(ctx context.Context, binPath, logDir string) error {
 	if fileExists(keyPath) && !wizardRepair {
 		fmt.Fprintf(os.Stderr, "agentcookie wizard: existing paired key for %q found; skipping pairing (use --repair to force)\n", wizardPeer)
 	} else {
-		res, err := pairing.RunSink(ctx, wizardPairURL, pairing.Code(wizardCode), wizardLocalName)
+		res, err := pairing.RunSink(ctx, wizardPairURL, wizardCode, wizardLocalName)
 		if err != nil {
 			return fmt.Errorf("sink pairing: %w", err)
 		}
@@ -507,35 +522,24 @@ func runWizardUninstall(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// beginSourcePairing starts a source-side pairing listener and waits for the
-// sink to connect. Returns a human-readable instruction block (which is also
-// the content of ~/.agentcookie/pairing.json) plus the code, blocking until
-// pairing completes or times out.
-func beginSourcePairing(ctx context.Context, listen, localName, binPath, logDir string) (string, pairing.Code, error) {
-	pairingInfoPath := filepath.Join(filepath.Dir(common.ConfigDir), ".agentcookie", "pairing.json")
-	_ = pairingInfoPath // computed for symmetry; we write under ~/.agentcookie/
+// beginSourcePairing writes only nonsecret routing/status metadata, delivers
+// the one-time code directly to secretWriter, and waits for the sink. The code
+// never enters pairing.json, status output, logs, or a returned value.
+func beginSourcePairing(ctx context.Context, listen, localName string, statusWriter, secretWriter io.Writer, infoPath string) (*pairing.HandshakeResult, error) {
+	return beginSourcePairingWithRunner(ctx, listen, localName, statusWriter, secretWriter, infoPath, pairing.RunSource)
+}
 
-	home, _ := os.UserHomeDir()
-	infoPath := filepath.Join(home, ".agentcookie", "pairing.json")
-	if err := os.MkdirAll(filepath.Dir(infoPath), 0o700); err != nil {
-		return "", "", err
+type sourcePairingRunner func(context.Context, string, string, io.Writer, io.Writer) (*pairing.HandshakeResult, error)
+
+func beginSourcePairingWithRunner(ctx context.Context, listen, localName string, statusWriter, secretWriter io.Writer, infoPath string, runner sourcePairingRunner) (*pairing.HandshakeResult, error) {
+	if err := writePairingMetadata(infoPath, listen, localName); err != nil {
+		return nil, err
 	}
+	defer os.Remove(infoPath)
 
-	// RunSource generates the code internally and prints it. We wrap so we can
-	// also write it to a file the SSH'ing agent can grab.
-	codeCh := make(chan pairing.Code, 1)
-	infoWriter := &pairingInfoWriter{
-		listen:      listen,
-		peer:        localName,
-		path:        infoPath,
-		notify:      codeCh,
-		onPlainLine: os.Stderr,
-	}
-
-	res, code, err := pairing.RunSource(ctx, listen, localName, infoWriter)
+	res, err := runner(ctx, listen, localName, statusWriter, secretWriter)
 	if err != nil {
-		_ = os.Remove(infoPath)
-		return "", code, err
+		return nil, err
 	}
 
 	// v0.12.0-beta.2: file the key under the operator-supplied peer
@@ -557,15 +561,34 @@ func beginSourcePairing(ctx context.Context, listen, localName, binPath, logDir 
 		ProtocolVer: pairing.ProtocolVersion,
 	}
 	if wizardPeer != res.RemotePeer {
-		fmt.Fprintf(os.Stderr, "agentcookie wizard: sink announced itself as %q; storing key under operator-supplied --peer %q\n", res.RemotePeer, wizardPeer)
+		fmt.Fprintf(statusWriter, "agentcookie wizard: sink announced itself as %q; storing key under operator-supplied --peer %q\n", res.RemotePeer, wizardPeer)
 	}
 	if err := keystore.Save(common.ConfigDir, pk); err != nil {
-		return "", code, fmt.Errorf("save key: %w", err)
+		return nil, fmt.Errorf("save key: %w", err)
 	}
-	// Clean up the pairing info file now that we're paired.
-	_ = os.Remove(infoPath)
+	return res, nil
+}
 
-	return fmt.Sprintf("agentcookie wizard: paired (code %s, fingerprint %s)", code, res.Fingerprint), code, nil
+func defaultPairingInfoPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".agentcookie", "pairing.json")
+}
+
+func writePairingMetadata(infoPath, listen, localName string) error {
+	if err := os.MkdirAll(filepath.Dir(infoPath), 0o700); err != nil {
+		return err
+	}
+	info := map[string]string{
+		"peer":     localName,
+		"pair_url": fmt.Sprintf("http://%s/pair", listen),
+		"sink_run": fmt.Sprintf("printf '%%s\\n' \"$AGENTCOOKIE_PAIR_CODE\" | agentcookie wizard install --as sink --peer %s --pair-url http://%s/pair --code-stdin", localName, listen),
+		"status":   "waiting_for_owner_attended_pairing",
+	}
+	body, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode nonsecret pairing metadata: %w", err)
+	}
+	return os.WriteFile(infoPath, body, 0o600)
 }
 
 // guardConfigPeerMismatch refuses to leave a stale peer.hostname in
@@ -602,53 +625,6 @@ func guardConfigPeerMismatch(role, path, wantPeer string) error {
 		return nil
 	}
 	return fmt.Errorf("existing %s.yaml has peer.hostname %q but --peer is %q; pass --force to overwrite (otherwise pair handshake will save a key the running daemon cannot find)", role, existing, wantPeer)
-}
-
-// pairingInfoWriter intercepts the source-side pairing announcement and writes
-// a JSON sibling file an SSH'ing agent can grab.
-type pairingInfoWriter struct {
-	listen      string
-	peer        string
-	path        string
-	notify      chan<- pairing.Code
-	onPlainLine *os.File
-	written     bool
-}
-
-func (p *pairingInfoWriter) Write(data []byte) (int, error) {
-	if !p.written && strings.Contains(string(data), "pairing code:") {
-		code := extractCode(string(data))
-		if code != "" {
-			info := map[string]string{
-				"code":     code,
-				"peer":     p.peer,
-				"pair_url": fmt.Sprintf("http://%s/pair", p.listen),
-				"sink_run": fmt.Sprintf("agentcookie wizard install --as sink --peer %s --code %s --pair-url http://%s/pair", p.peer, code, p.listen),
-			}
-			body, _ := json.MarshalIndent(info, "", "  ")
-			_ = os.WriteFile(p.path, body, 0o600)
-			p.written = true
-			select {
-			case p.notify <- pairing.Code(code):
-			default:
-			}
-		}
-	}
-	return p.onPlainLine.Write(data)
-}
-
-func extractCode(text string) string {
-	const tag = "pairing code:"
-	_, after, ok := strings.Cut(text, tag)
-	if !ok {
-		return ""
-	}
-	tail := after
-	fields := strings.Fields(tail)
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
 }
 
 func writeYAMLIfMissing(path, content string, force bool) error {

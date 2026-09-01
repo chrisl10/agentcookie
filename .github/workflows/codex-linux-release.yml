@@ -1,0 +1,364 @@
+name: codex-linux-release
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  push:
+    tags:
+      - v1.1.0-codex.1
+
+concurrency:
+  group: codex-linux-release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: v1.1.0-codex.1
+  ARTIFACT_NAME: agentcookie_1.1.0-codex.1_linux_amd64
+  SBOM_NAME: agentcookie_1.1.0-codex.1_linux_amd64.cdx.json
+  PROVENANCE_BUNDLE_NAME: agentcookie_1.1.0-codex.1_linux_amd64.provenance.json
+  SBOM_ATTESTATION_BUNDLE_NAME: agentcookie_1.1.0-codex.1_linux_amd64.sbom-attestation.json
+  SIGNER_WORKFLOW: chrisl10/agentcookie/.github/workflows/codex-linux-release.yml
+  # actions/checkout writes safe.directory into a temporary HOME that is
+  # removed before later container steps. Keep Git trust scoped to this exact
+  # checked-out workspace without mutating the runner's persistent config.
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: safe.directory
+  GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+
+jobs:
+  verify:
+    name: verify source and dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      HOME: /tmp/agentcookie-home
+      GOCACHE: /tmp/agentcookie-go-build
+      GOMODCACHE: /tmp/agentcookie-go-mod
+      GOPATH: /tmp/agentcookie-go
+      RUNNER_TEMP: /tmp
+    container:
+      image: docker.io/library/golang@sha256:659cc38c1a394eeb4dd7e31fff6df128bd33444dcc7afd70e3bed5225749dbc0
+      options: --platform linux/amd64 --user 1001:1001
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify locks, module, tests, vet, and reachable vulnerabilities
+        run: ./scripts/codex-linux-release.sh verify
+
+  build:
+    name: reproducible build ${{ matrix.replica }}
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      HOME: /tmp/agentcookie-home
+      GOCACHE: /tmp/agentcookie-go-build
+      GOMODCACHE: /tmp/agentcookie-go-mod
+      GOPATH: /tmp/agentcookie-go
+      RUNNER_TEMP: /tmp
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [a, b]
+    container:
+      image: docker.io/library/golang@sha256:659cc38c1a394eeb4dd7e31fff6df128bd33444dcc7afd70e3bed5225749dbc0
+      options: --platform linux/amd64 --user 1001:1001
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build candidate
+        run: ./scripts/codex-linux-release.sh build "dist-${{ matrix.replica }}"
+
+      - name: Upload isolated build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: codex-linux-build-${{ matrix.replica }}
+          path: dist-${{ matrix.replica }}/${{ env.ARTIFACT_NAME }}
+          if-no-files-found: error
+          retention-days: 7
+
+  promote:
+    name: compare, SBOM, and package
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      HOME: /tmp/agentcookie-home
+      GOCACHE: /tmp/agentcookie-go-build
+      GOMODCACHE: /tmp/agentcookie-go-mod
+      GOPATH: /tmp/agentcookie-go
+      RUNNER_TEMP: /tmp
+    container:
+      image: docker.io/library/golang@sha256:659cc38c1a394eeb4dd7e31fff6df128bd33444dcc7afd70e3bed5225749dbc0
+      options: --platform linux/amd64 --user 1001:1001
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download build A
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: codex-linux-build-a
+          path: /tmp/agentcookie-build-a
+
+      - name: Download build B
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: codex-linux-build-b
+          path: /tmp/agentcookie-build-b
+
+      - name: Require byte-identical builds
+        run: |
+          cmp "/tmp/agentcookie-build-a/${ARTIFACT_NAME}" "/tmp/agentcookie-build-b/${ARTIFACT_NAME}"
+          sha256sum "/tmp/agentcookie-build-a/${ARTIFACT_NAME}" "/tmp/agentcookie-build-b/${ARTIFACT_NAME}"
+
+      - name: Assemble release assets
+        run: |
+          install -D -m 0755 "/tmp/agentcookie-build-a/${ARTIFACT_NAME}" "dist/${ARTIFACT_NAME}"
+          install -m 0644 LICENSE dist/LICENSE
+          ./scripts/codex-linux-release.sh sbom \
+            "dist/${ARTIFACT_NAME}" "dist/${SBOM_NAME}"
+          ./scripts/codex-linux-release.sh provenance \
+            "dist/${ARTIFACT_NAME}" "dist/${SBOM_NAME}" dist/BUILD-PROVENANCE.txt
+          (
+            cd dist
+            sha256sum \
+              "${ARTIFACT_NAME}" \
+              "${SBOM_NAME}" \
+              LICENSE \
+              BUILD-PROVENANCE.txt > SHA256SUMS
+          )
+          cat dist/SHA256SUMS
+
+      - name: Upload promoted release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: codex-linux-release-bundle
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  release-preflight:
+    name: prove merged tag and runtime release controls
+    needs: promote
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+    steps:
+      - name: Checkout the exact release tag
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The reviewer rule is repository runtime state and cannot be declared
+      # in workflow YAML. Fail closed unless the API proves it exists.
+      - name: Verify merged-tag and external release controls
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "${GITHUB_REPOSITORY}" = 'chrisl10/agentcookie'
+          test "${GITHUB_REF}" = "refs/tags/${RELEASE_TAG}"
+          test "${GITHUB_SHA}" = "$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")"
+          git fetch --no-tags --prune origin \
+            '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main
+          reviewer_count="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/environments/prd005-release" \
+            --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length')"
+          test "$reviewer_count" -ge 1
+          immutable="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases" \
+            --jq .enabled)"
+          test "$immutable" = true
+          {
+            echo '### PRD-005 release preflight'
+            echo "- Candidate commit: ${GITHUB_SHA}"
+            echo '- Candidate is merged into current origin/main: yes'
+            echo "- prd005-release required reviewers: ${reviewer_count}"
+            echo "- Immutable releases enabled: ${immutable}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  attest:
+    name: attest exact tag assets
+    needs: [promote, release-preflight]
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download promoted release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: codex-linux-release-bundle
+          path: dist
+
+      - name: Attest release-asset provenance
+        id: provenance_attestation
+        uses: actions/attest@c32b4b8b198b65d0bd9d63490e847ff7b53989d4 # v4.0.0
+        with:
+          subject-path: |
+            dist/agentcookie_1.1.0-codex.1_linux_amd64
+            dist/agentcookie_1.1.0-codex.1_linux_amd64.cdx.json
+            dist/LICENSE
+            dist/BUILD-PROVENANCE.txt
+
+      - name: Attest binary with CycloneDX SBOM
+        id: sbom_attestation
+        uses: actions/attest@c32b4b8b198b65d0bd9d63490e847ff7b53989d4 # v4.0.0
+        with:
+          subject-path: dist/agentcookie_1.1.0-codex.1_linux_amd64
+          sbom-path: dist/agentcookie_1.1.0-codex.1_linux_amd64.cdx.json
+
+      - name: Stage canonical offline attestation bundles
+        run: |
+          install -D -m 0644 \
+            "${{ steps.provenance_attestation.outputs.bundle-path }}" \
+            "attestation-bundles/${PROVENANCE_BUNDLE_NAME}"
+          install -m 0644 \
+            "${{ steps.sbom_attestation.outputs.bundle-path }}" \
+            "attestation-bundles/${SBOM_ATTESTATION_BUNDLE_NAME}"
+          test -s "attestation-bundles/${PROVENANCE_BUNDLE_NAME}"
+          test -s "attestation-bundles/${SBOM_ATTESTATION_BUNDLE_NAME}"
+
+      - name: Upload offline attestation bundles
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: codex-linux-attestation-bundles
+          path: attestation-bundles/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: publish approved immutable release
+    needs: attest
+    if: github.event_name == 'push' && github.ref == 'refs/tags/v1.1.0-codex.1'
+    environment: prd005-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+      attestations: read
+      deployments: read
+    steps:
+      - name: Checkout the exact release tag
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reverify merged tag and external release controls
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "${GITHUB_REPOSITORY}" = 'chrisl10/agentcookie'
+          test "${GITHUB_REF}" = "refs/tags/${RELEASE_TAG}"
+          test "${GITHUB_SHA}" = "$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")"
+          git fetch --no-tags --prune origin \
+            '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main
+          reviewer_count="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/environments/prd005-release" \
+            --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length')"
+          test "$reviewer_count" -ge 1
+          test "$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases" \
+            --jq .enabled)" = true
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release already exists: ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+
+      - name: Download attested release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: codex-linux-release-bundle
+          path: dist
+
+      - name: Download offline attestation bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: codex-linux-attestation-bundles
+          path: dist
+
+      - name: Finalize checksums and verify offline attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (
+            cd dist
+            sha256sum \
+              "${ARTIFACT_NAME}" \
+              "${SBOM_NAME}" \
+              LICENSE \
+              BUILD-PROVENANCE.txt \
+              "${PROVENANCE_BUNDLE_NAME}" \
+              "${SBOM_ATTESTATION_BUNDLE_NAME}" > SHA256SUMS
+          )
+          (cd dist && sha256sum --check SHA256SUMS)
+          gh attestation verify "dist/${ARTIFACT_NAME}" \
+            --bundle "dist/${PROVENANCE_BUNDLE_NAME}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$SIGNER_WORKFLOW" \
+            --source-ref "$GITHUB_REF" \
+            --source-digest "$GITHUB_SHA"
+          gh attestation verify "dist/${ARTIFACT_NAME}" \
+            --bundle "dist/${SBOM_ATTESTATION_BUNDLE_NAME}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --predicate-type 'https://cyclonedx.org/bom' \
+            --signer-workflow "$SIGNER_WORKFLOW" \
+            --source-ref "$GITHUB_REF" \
+            --source-digest "$GITHUB_SHA"
+
+      - name: Publish the exact immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "dist/${ARTIFACT_NAME}" \
+            "dist/${SBOM_NAME}" \
+            "dist/${PROVENANCE_BUNDLE_NAME}" \
+            "dist/${SBOM_ATTESTATION_BUNDLE_NAME}" \
+            dist/LICENSE \
+            dist/BUILD-PROVENANCE.txt \
+            dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "AgentCookie ${RELEASE_TAG} — ReachLynk hardened Linux sink" \
+            --notes "Reviewed Linux amd64 sink derived from upstream 97dd731250b0d9a340f2d0fa776346d807335d60 with security-remediated locked patch a60f15c6c87195ae949774117762e8f78ae63df8a3e79d99be7fa7de6dc931ff."
+
+      - name: Verify published immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" --json isImmutable --jq .isImmutable)" = true
+          gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          gh release verify-asset "$RELEASE_TAG" \
+            "dist/${ARTIFACT_NAME}" --repo "$GITHUB_REPOSITORY"

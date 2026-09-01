@@ -39,9 +39,9 @@ Optional: Go 1.22+ if you want to build from source. Not required when using the
    - Place it at `/usr/local/bin/agentcookie` (or `~/bin/agentcookie` if you don't have admin)
    - Prompt for the sink machine's Tailscale hostname (e.g. `second-mac`)
    - Run `agentcookie wizard install --as source --peer <sink>` interactively
-   - End by printing a pairing code
+   - Show the pairing code only on the owner-attended controlling terminal
 
-Save the pairing code. You'll need it on the sink.
+Keep the source terminal open. The code is not written to `pairing.json` or logs; enter it through the sink's hidden stdin prompt.
 
 Cookie policy note: the default `blocklist.yaml` remains opt-out and syncs
 everything unless a host matches a listed pattern. For a stricter headless agent
@@ -55,7 +55,7 @@ Same flow, opposite role:
 
 1. SSH or screen-share into your sink Mac.
 2. Extract the same release tarball.
-3. Run: `./install-beta.sh --as sink --peer <macbook> --code <pairing-code> --pair-url <pair-url>` (the source's wizard install printed the code + URL for you to copy here).
+3. Run `read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE`, then `printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | ./install-beta.sh --as sink --peer <macbook> --pair-url <pair-url> --code-stdin`, and finally `unset AGENTCOOKIE_PAIR_CODE`. The source's wizard install prints the code and URL.
 4. The script verifies the code signature, places the binary, runs `agentcookie wizard install --as sink ...`, and ends with `doctor`.
 
 On a GUI install (you're at the sink's keyboard, or you opened Terminal locally), you'll see one Keychain prompt asking permission for `agentcookie` to access Chrome Safe Storage. Click **Always Allow**.

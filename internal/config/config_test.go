@@ -175,6 +175,70 @@ security:
 	}
 }
 
+func TestValidateLiveCDPEndpointIsLoopbackOnly(t *testing.T) {
+	valid := []string{
+		"", // Secure built-in default: http://127.0.0.1:9223.
+		"http://127.0.0.1:9223",
+		"http://127.0.0.1:9223/",
+		"http://[::1]:9223",
+		"http://[::1]:9223/",
+	}
+	for _, endpoint := range valid {
+		t.Run("valid_"+strings.ReplaceAll(endpoint, "/", "_"), func(t *testing.T) {
+			if err := validateLiveCDPEndpoint(endpoint); err != nil {
+				t.Fatalf("validateLiveCDPEndpoint(%q): %v", endpoint, err)
+			}
+		})
+	}
+
+	invalid := []string{
+		"https://127.0.0.1:9223",
+		"HTTP://127.0.0.1:9223",
+		"http://localhost:9223",
+		"http://127.0.0.2:9223",
+		"http://0.0.0.0:9223",
+		"http://[::]:9223",
+		"http://[::ffff:127.0.0.1]:9223",
+		"http://127.0.0.1",
+		"http://[::1]",
+		"http://127.0.0.1:0",
+		"http://127.0.0.1:65536",
+		"http://127.0.0.1:09223",
+		"http://user@127.0.0.1:9223",
+		"http://user:pass@127.0.0.1:9223",
+		"http://127.0.0.1:9223/json",
+		"http://127.0.0.1:9223/%2f",
+		"http://127.0.0.1:9223?target=remote",
+		"http://127.0.0.1:9223?",
+		"http://127.0.0.1:9223#fragment",
+		"http://127.0.0.1:9223#",
+	}
+	for _, endpoint := range invalid {
+		t.Run("invalid_"+strings.ReplaceAll(endpoint, "/", "_"), func(t *testing.T) {
+			if err := validateLiveCDPEndpoint(endpoint); err == nil {
+				t.Fatalf("validateLiveCDPEndpoint(%q) succeeded", endpoint)
+			}
+		})
+	}
+}
+
+func TestLoadSinkRejectsUnsafeLiveCDPEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "sink.yaml", `
+listen:
+  addr: 100.80.229.80:9999
+live_cdp:
+  enabled: true
+  endpoint: http://169.254.169.254:80/latest/meta-data
+security:
+  shared_secret: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+`)
+	_, err := LoadSink(dir)
+	if err == nil || !strings.Contains(err.Error(), "live_cdp.endpoint") {
+		t.Fatalf("LoadSink unsafe endpoint error = %v", err)
+	}
+}
+
 // TestLoadSinkSkipChromeSQLite covers the v0.12.0-beta.3 headless mode.
 // Round-trips skip_chrome_sqlite + cdp.enabled through YAML and checks
 // that absence defaults to legacy behavior (R6 regression guard).

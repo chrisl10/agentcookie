@@ -293,7 +293,7 @@ writeYAMLIfMissing(sinkYAMLPath, renderSinkYAML(wizardPeer, listenAddr, skip), w
 **Execution note:** This unit is the validation gate. If the dry-run surfaces blockers, file a follow-up plan rather than patching this plan; v0.12.0-beta.3 ships when this unit's verification passes.
 
 **Test scenarios:**
-- happy path (manual): SSH install on freshly-wiped Mac mini, friend runs `install-beta.sh --as sink --peer macbook-pro-44 --code <code> --pair-url <url>`. Zero GUI prompts. Sync succeeds within 30 seconds. `agentcookie doctor` reports green.
+- happy path (manual): SSH install on freshly-wiped Mac mini, friend runs `read -rsp 'Pairing code: ' AGENTCOOKIE_PAIR_CODE; printf '\n'`, then `printf '%s\n' "$AGENTCOOKIE_PAIR_CODE" | install-beta.sh --as sink --peer macbook-pro-44 --pair-url <url> --code-stdin`, then `unset AGENTCOOKIE_PAIR_CODE`. Zero GUI prompts. Sync succeeds within 30 seconds. `agentcookie doctor` reports green.
 - happy path (manual): PP CLI (`instacart-pp-cli carts`) over SSH succeeds without auth login.
 - happy path (manual): launching Chrome.app on the Mac mini against the agentcookie-owned profile shows synced cookies present (CDP injection round-trips through Chrome's own SQLite).
 - regression: existing v0.12.0-beta.2 sink upgraded in place (binary swap, no config changes) keeps working in legacy mode (no behavior change for existing friends).
